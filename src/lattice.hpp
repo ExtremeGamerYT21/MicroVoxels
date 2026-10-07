@@ -32,4 +32,13 @@ inline int chooseLod(float distance, float threshold, int levels, int previous =
         ++lod;
     return lod;
 }
+inline int chooseCoverageLod(float footprint, float base, int levels, int previous = -1,
+                             float hysteresis = .10f) {
+    int lod = std::clamp(std::max(previous, 0), 0, levels - 1);
+    while (lod > 0 && footprint < std::ldexp(base, lod - 1) * (1 - hysteresis))
+        --lod;
+    while (lod < levels - 1 && footprint > std::ldexp(base, lod))
+        ++lod;
+    return lod;
+}
 } // namespace micro

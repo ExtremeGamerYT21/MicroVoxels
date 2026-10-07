@@ -36,7 +36,7 @@ cmake --build build --config Release
 .\build\Release\microvoxels.exe
 ```
 
-The Windows build recipe is provided for the user's AMD desktop; this run was built and tested on Linux.
+CI compiles the Windows version with MSVC and checks Vulkan rendering on Linux with a software driver.
 Shaders are compiled automatically and loaded from the build's shader directory. Build locally before running.
 
 ## Try the experiment
@@ -51,6 +51,8 @@ Click the HUD's buttons and sliders, or use these keys:
 |---|---|
 | WASD / Q / E | Fly forward/backward/sideways/down/up |
 | Hold right mouse | Look around |
+| R | Reset the camera to the starting view and unfreeze/resample the cloud |
+| C | Toggle adaptive LOD based on the spacing between source samples |
 | Shift | Faster camera |
 | Tab | Source → microvoxels → side by side |
 | F | Freeze/unfreeze the generated cloud; camera and source animation continue |
@@ -70,15 +72,24 @@ also retain their original view-dependent source shading, including the captured
 Use the left pane to see the current continuous scene while the right pane displays that frozen shell.
 
 Defaults: base size 10 mm; first LOD boundary 4 m; five levels; ±10% hysteresis; 1.03× cube size.
+Adaptive LOD is enabled: it raises a region's level when source samples are too far apart for smaller cells.
+This reduces distant/grazing-angle gaps at the cost of larger visible cells. It respects the enabled level
+count; the coarsest available cells can still be too small. Press `C` or pass `--no-adaptive-lod` to compare
+the original distance-only selection. Additional source samples (`X`) can preserve finer cells.
 The grid origin stays at world `(0,0,0)` through camera movement. The slight cube enlargement helps
 coverage; set `Settings::splat` to `1.0` for exact cell-sized cubes.
+
+If both panes are empty and the HUD reports `HITS 0`, press `R` to restore the starting view. Mouse look
+rebases on capture, stops on focus loss, and ignores cursor warps; profile reports include the camera pose
+to help distinguish lost source visibility from a voxel draw failure.
 
 ## Pipeline
 
 1. **SourceWorld** makes 2,860 ordinary triangles: ground, sphere, crystal, rocks, trunk, branches, leaves.
 2. **SourceRenderer** draws a source shadow map and a G-buffer of valid world positions and already-shaded
    linear RGB. Lighting, normals, procedural checker colour, gloss, and shadows all belong to this stage.
-3. **VisualVoxelizer** chooses a nested world-grid LOD, hashes exact cell keys, reduces samples, and compacts
+3. **VisualVoxelizer** reduces distance/coverage requests to one LOD per world region, resolves sample LODs,
+   hashes exact cell keys, reduces samples, and compacts
    the occupied cells into GPU instances and a GPU-written indirect draw command.
 4. **VoxelRenderer** depth-tests those instances and writes their stored colours. All faces of one normal
    voxel have identical RGB. Source comparison, debug cube lighting, and HUD are separate draw pipelines.
@@ -95,6 +106,7 @@ capacity limits, and known artefacts. Read [the measured profile](docs/PROFILING
 ```sh
 ctest --test-dir build --output-on-failure
 ./build/microvoxels --validation --verify --exercise --frames 8 --width 480 --height 360
+./build/microvoxels --validation --verify --exercise-controls --frames 16 --width 480 --height 360
 ./build/microvoxels --frames 120 --width 1100 --height 720 --no-ui --report profile.json
 ./build/microvoxels --frames 1 --time 1.2 --screenshot comparison.ppm
 ```
@@ -102,7 +114,9 @@ ctest --test-dir build --output-on-failure
 `--validation` requires `VK_LAYER_KHRONOS_validation`. `--verify` performs expensive readbacks and CPU
 reference checks; leave it off when measuring interactive performance. `--exercise` freezes the cloud,
 moves the camera, checks byte-identical instances/counters, unfreezes, and exercises closest RGB and debug
-cube lighting. `--hidden` hides a GLFW window; it still needs a display. In CI, use `xvfb-run -a`.
+cube lighting. `--exercise-controls` checks mouse capture/focus, looking away, freezing an empty cloud,
+camera reset, setting changes, sample-target recreation, and window resize. `--hidden` hides a GLFW window;
+it still needs a display. In CI, use `xvfb-run -a`.
 
 JSON reports contain source triangle count, sampling resolution, visible hits, unique voxels, per-LOD counts,
 dropped samples, validation errors, and per-stage Vulkan timestamp durations after two warm-up frames.

@@ -6,7 +6,7 @@ struct Settings {
     float base = .01f, distance = 4.f, splat = 1.03f;
     int levels = 5, mode = 2, lighting = 2;
     bool average = true, cubeLight = false, frozen = false, supersampling = false, paused = false,
-         visibleHud = true;
+         visibleHud = true, adaptiveLod = true;
 };
 struct HudVertex {
     glm::vec2 position;

@@ -10,7 +10,7 @@ VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform)
     instances = vk.buffer(Capacity * sizeof(Voxel),
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     for (auto &r : roots)
-        r = vk.buffer(RootCapacity * 4ull,
+        r = vk.buffer(RootCapacity * 8ull,
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     std::vector<VkDescriptorSetLayoutBinding> bindings;
     for (uint32_t i = 0; i <= 10; i++) {
@@ -30,6 +30,7 @@ VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform)
     for (auto &s : sets)
         s = vk.allocate(setLayout);
     lodPipeline = vk.compute(layout, "lod.comp");
+    resolveLodPipeline = vk.compute(layout, "lod_resolve.comp");
     hashPipeline = vk.compute(layout, "voxelize.comp");
     compactPipeline = vk.compute(layout, "compact.comp");
 }
@@ -113,6 +114,10 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
     vkCmdDispatch(vk.cmd, (p.extent.x + 7) / 8, (p.extent.y + 7) / 8, 1);
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolveLodPipeline);
+    vkCmdDispatch(vk.cmd, (p.extent.x + 7) / 8, (p.extent.y + 7) / 8, 1);
+    vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     if (q)
         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 2);
     vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hashPipeline);
@@ -141,7 +146,7 @@ VisualVoxelizer::~VisualVoxelizer() {
     vk.destroy(slots);
     vk.destroy(counters);
     vk.destroy(instances);
-    for (auto p : {lodPipeline, hashPipeline, compactPipeline})
+    for (auto p : {lodPipeline, resolveLodPipeline, hashPipeline, compactPipeline})
         vkDestroyPipeline(vk.device, p, nullptr);
     vkDestroyPipelineLayout(vk.device, layout, nullptr);
     vkFreeDescriptorSets(vk.device, vk.descriptorPool, 2, sets.data());

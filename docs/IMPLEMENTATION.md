@@ -20,7 +20,7 @@ all three signed cell coordinates and the LOD, not just a truncated hash.
 LOD is selected for a **world-space root region** whose size equals the largest enabled voxel size.
 All visible samples inside that region use the same level. This prevents a large parent and smaller
 children occupying the same region because individual pixels happened to fall on opposite distance thresholds.
-The camera-to-region-centre distance determines the level; it approximates per-hit distance.
+The camera-to-region-centre distance determines the minimum distance-based level; it approximates per-hit distance.
 
 Boundary `l → l+1` is at `firstDistance * 2^l`. With history, refine below 90% of that boundary and coarsen
 above 110%. Each region looks up its previous visible level in a sparse one-frame metadata hash. A newly
@@ -28,6 +28,17 @@ visible region selects its level directly. Regions unseen for a frame lose that 
 can pop. Grid/LOD-count changes reset history. Large camera jumps can cross several boundaries in one frame.
 Colour is averaged directly from the current source samples at the selected size. It is a screen-sample-weighted
 average rather than a precomputed full-object mip hierarchy.
+
+Adaptive coverage also measures the world-space step to neighboring valid source samples along both pixel
+axes. For each axis it chooses the closer of the two neighbors, avoiding most occlusion-boundary jumps.
+The sum of the absolute steps estimates the pixel footprint along each world axis; the largest component,
+with a 1.25 margin, sets a minimum cell size. Coverage coarsens immediately when a cell is too small and
+refines below 90% of the next finer size. The enabled level count remains an upper limit.
+
+The first LOD dispatch atomically reduces all distance/coverage requests in a world region to their maximum.
+Each metadata entry stores an immutable source owner ID and the selected level. A second dispatch reads the
+completed region metadata and writes that same LOD to every sample in the region. This prevents a per-pixel
+coverage adjustment from introducing overlapping parents and children. Toggling adaptive LOD resets history.
 
 ## Deduplication without publication races
 
@@ -47,7 +58,8 @@ Output capacity equals hash capacity, so compaction cannot write beyond the inst
 
 The table has 1,048,576 slots and a 96-probe budget. The world-region history table has 262,144 slots and
 a 64-probe budget. Exceeding either budget increments a visible statistic. A full visual table can create
-holes; dropped history only loses hysteresis for those regions. The prototype reports these limits rather
+holes; saturated root metadata loses hysteresis and consistently uses the coarsest level for an unregistered
+region. The prototype reports these limits rather
 than silently claiming full coverage. Use coarser cells if the visual table saturates.
 
 ## Draw and synchronization
@@ -71,16 +83,23 @@ transition uses the transfer stage in both scopes to chain it after the acquire 
 wait. Validation is optional and
 fails the run if an error is reported. CI additionally enables synchronization validation for its GPU checks.
 
-Freeze skips all three generation dispatches and preserves instance/counter buffers. Source animation,
+Freeze skips both LOD dispatches, colour reduction and compaction, and preserves instance/counter buffers. Source animation,
 source shading and the camera continue. Resize recreates source images/history and presentation targets,
 while retaining a frozen cloud. Unfreezing resamples the current camera view.
+
+Camera reset (`R`) restores the initial pose and unfreezes the cloud, including an empty frozen cloud.
+Mouse capture discards its first cursor event as a baseline, rejects implausible warps and non-finite
+positions, and releases on focus loss. Yaw is wrapped and pitch is limited; a non-finite pose resets before
+the view matrix is built. Toggle keys respond only to key presses, while size/distance adjustments can repeat.
 
 ## Current compromises
 
 - Raster sampling reveals only the nearest opaque source layer. Cubes cannot recover surfaces never sampled.
 - A cell crossing a silhouette is a whole cube. It can protrude or partially cover a foreground feature.
 - Screen sampling can miss small cells; 2×2 sampling and 3% enlarged splats reduce gaps without voxelizing volumes.
-- At grazing angles and very fine sizes, holes remain. There is no temporal occupancy accumulation yet.
+- Coverage LOD reduces gaps at grazing angles, but can reach the enabled maximum or miss isolated thin
+  surfaces. It also cannot recover occluded surfaces exposed by moving around a frozen cloud. There is no
+  temporal occupancy accumulation yet.
 - Averaging a cell that contains several source surfaces mixes their already-shaded colours. Closest mode
   avoids that mix but can cause stronger colour popping.
 - Sharp material boundaries and distance changes can produce visible popping. That is part of the experiment.

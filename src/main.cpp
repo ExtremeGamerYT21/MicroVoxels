@@ -4,6 +4,7 @@
 #include "voxel_renderer.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -16,7 +17,8 @@
 using namespace micro;
 struct Options {
     int width = 1100, height = 720, frames = 0;
-    bool hidden = false, verify = false, validation = false, exercise = false, noUi = false;
+    bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
+         exerciseControls = false;
     float fixedTime = -1;
     std::string screenshot, report;
     Settings settings;
@@ -44,6 +46,8 @@ Options parse(int argc, char **argv) {
             o.validation = true;
         else if (a == "--exercise")
             o.exercise = true;
+        else if (a == "--exercise-controls")
+            o.exerciseControls = true;
         else if (a == "--no-ui")
             o.noUi = true;
         else if (a == "--time")
@@ -68,6 +72,8 @@ Options parse(int argc, char **argv) {
             o.settings.supersampling = true;
         else if (a == "--closest")
             o.settings.average = false;
+        else if (a == "--no-adaptive-lod")
+            o.settings.adaptiveLod = false;
         else if (a == "--help") {
             std::cout
                 << "Microvoxels: Vulkan triangle samples -> unlit cubic splats\n"
@@ -75,9 +81,11 @@ Options parse(int argc, char **argv) {
                 << "--voxel-size METERS --lod-distance METERS --levels 1..6 --mode 0|1|2\n"
                 << "--lighting 0|1|2 --debug-cubes --closest --supersampling --time SECONDS\n"
                 << "--no-ui --screenshot FILE.ppm --report FILE.json\n"
+                << "--no-adaptive-lod --exercise-controls (requires 16 frames)\n"
                 << "WASD/QE fly; right mouse look; Tab view; F freeze; G cube-light debug;\n"
                 << "O average/closest; X supersampling; H lighting; P pause; +/- voxel size;\n"
-                << "[/] LOD distance; 1..6 LOD count; F1 HUD; Esc exit.\n";
+                << "[/] LOD distance; 1..6 LOD count; R reset view; C adaptive LOD; F1 HUD; Esc "
+                   "exit.\n";
             std::exit(0);
         } else
             throw std::runtime_error("Unknown option: " + a);
@@ -91,20 +99,47 @@ Options parse(int argc, char **argv) {
         throw std::runtime_error("Settings out of range; see --help");
     if (o.exercise && o.frames < 8)
         throw std::runtime_error("--exercise requires --frames 8 or more");
+    if (o.exerciseControls && (o.frames < 16 || o.exercise))
+        throw std::runtime_error(
+            "--exercise-controls requires 16 frames and cannot combine with --exercise");
     o.settings.visibleHud = !o.noUi;
     return o;
 }
 struct Input {
     Settings *settings;
     Hud *hud;
+    glm::vec3 *camera;
     double lastX{}, lastY{};
-    bool looking = false;
+    bool looking = false, anchored = false;
     float yaw = -2.14f, pitch = -.27f;
 };
+void stopLooking(GLFWwindow *w, Input &in) {
+    in.looking = in.anchored = false;
+    glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+}
+void resetCamera(GLFWwindow *w, Input &in) {
+    stopLooking(w, in);
+    *in.camera = {5.8f, 3.6f, 8.4f};
+    in.yaw = -2.14f;
+    in.pitch = -.27f;
+    in.settings->frozen = false;
+}
+void focusCallback(GLFWwindow *w, int focused) {
+    if (!focused)
+        stopLooking(w, *static_cast<Input *>(glfwGetWindowUserPointer(w)));
+}
 void keyCallback(GLFWwindow *w, int key, int, int action, int) {
-    if (action != GLFW_PRESS && action != GLFW_REPEAT)
+    bool adjustment = key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD || key == GLFW_KEY_MINUS ||
+                      key == GLFW_KEY_KP_SUBTRACT || key == GLFW_KEY_LEFT_BRACKET ||
+                      key == GLFW_KEY_RIGHT_BRACKET;
+    if (action != GLFW_PRESS && !(action == GLFW_REPEAT && adjustment))
         return;
-    auto &s = *static_cast<Input *>(glfwGetWindowUserPointer(w))->settings;
+    auto &in = *static_cast<Input *>(glfwGetWindowUserPointer(w));
+    auto &s = *in.settings;
+    if (key == GLFW_KEY_R)
+        resetCamera(w, in);
+    if (key == GLFW_KEY_C)
+        s.adaptiveLod = !s.adaptiveLod;
     if (key == GLFW_KEY_ESCAPE)
         glfwSetWindowShouldClose(w, 1);
     if (key == GLFW_KEY_TAB)
@@ -137,9 +172,15 @@ void keyCallback(GLFWwindow *w, int key, int, int action, int) {
 void mouseButton(GLFWwindow *w, int button, int action, int) {
     auto &in = *static_cast<Input *>(glfwGetWindowUserPointer(w));
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        in.looking = action == GLFW_PRESS;
+        // Cursor-mode changes can emit a queued recenter event. Rebase before
+        // accepting relative motion, including after an Alt-Tab/focus change.
+        in.looking = in.anchored = false;
+        glfwSetInputMode(w, GLFW_CURSOR,
+                         action == GLFW_PRESS ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        if (action == GLFW_PRESS && glfwRawMouseMotionSupported())
+            glfwSetInputMode(w, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
         glfwGetCursorPos(w, &in.lastX, &in.lastY);
-        glfwSetInputMode(w, GLFW_CURSOR, in.looking ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        in.looking = action == GLFW_PRESS;
     }
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && !in.looking) {
         double x, y;
@@ -147,17 +188,120 @@ void mouseButton(GLFWwindow *w, int button, int action, int) {
         int fw, fh, ww, wh;
         glfwGetFramebufferSize(w, &fw, &fh);
         glfwGetWindowSize(w, &ww, &wh);
-        in.hud->click(x * fw / ww, y * fh / wh, *in.settings);
+        if (fw > 0 && fh > 0 && ww > 0 && wh > 0)
+            in.hud->click(x * fw / ww, y * fh / wh, *in.settings);
     }
 }
 void mouseMove(GLFWwindow *w, double x, double y) {
     auto &in = *static_cast<Input *>(glfwGetWindowUserPointer(w));
-    if (in.looking) {
-        in.yaw += float(x - in.lastX) * .003f;
-        in.pitch = std::clamp(in.pitch - float(y - in.lastY) * .003f, -1.5f, 1.5f);
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        in.anchored = false;
+        return;
+    }
+    if (in.looking && in.anchored) {
+        int ww, wh;
+        glfwGetWindowSize(w, &ww, &wh);
+        double dx = x - in.lastX, dy = y - in.lastY;
+        if (std::abs(dx) <= std::max(ww, 1) && std::abs(dy) <= std::max(wh, 1)) {
+            in.yaw = std::remainder(in.yaw + float(dx) * .003f, 6.2831853f);
+            in.pitch = std::clamp(in.pitch - float(dy) * .003f, -1.5f, 1.5f);
+        }
     }
     in.lastX = x;
     in.lastY = y;
+    in.anchored = in.looking;
+}
+void exerciseControls(int frame, GLFWwindow *w, Input &in) {
+    auto &s = *in.settings;
+    auto press = [&](int key) { keyCallback(w, key, 0, GLFW_PRESS, 0); };
+    if (frame == 0)
+        press(GLFW_KEY_R);
+    if (frame == 1) {
+        float yaw = in.yaw, pitch = in.pitch;
+        mouseButton(w, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, 0);
+        mouseMove(w, 1e6, -1e6); // first motion must only establish a new baseline
+        mouseMove(w, 0, 0);      // an implausible cursor warp must not rotate the view
+        if (in.yaw != yaw || in.pitch != pitch)
+            throw std::runtime_error("Mouse capture changed the camera orientation");
+        mouseMove(w, 10, 5);
+        if (in.yaw == yaw || in.pitch == pitch)
+            throw std::runtime_error("Relative mouse look did not move the camera");
+        focusCallback(w, GLFW_FALSE);
+        yaw = in.yaw;
+        mouseMove(w, 1000, 1000);
+        if (in.looking || in.yaw != yaw)
+            throw std::runtime_error("Focus loss left mouse look active");
+        press(GLFW_KEY_R);
+    }
+    if (frame == 2) {
+        *in.camera = {50, 50, 50};
+        in.yaw = .7f;
+        in.pitch = .5f;
+    }
+    if (frame == 3)
+        s.frozen = true; // freeze an empty cloud, then recover it with the normal R handler
+    if (frame == 4) {
+        press(GLFW_KEY_R);
+        if (s.frozen || in.looking)
+            throw std::runtime_error("Camera reset did not resume sampling");
+    }
+    if (frame == 5) {
+        keyCallback(w, GLFW_KEY_F, 0, GLFW_REPEAT, 0);
+        if (s.frozen)
+            throw std::runtime_error("A repeated key toggled freeze");
+        press(GLFW_KEY_C);
+    }
+    if (frame == 6) {
+        s.base = .0216f;
+        s.distance = 8.6f;
+        s.levels = 5;
+    }
+    if (frame == 7)
+        press(GLFW_KEY_X);
+    if (frame == 8) {
+        press(GLFW_KEY_X);
+        press(GLFW_KEY_TAB);
+    }
+    if (frame == 9) {
+        press(GLFW_KEY_TAB);
+        press(GLFW_KEY_1);
+        s.base = .15f;
+    }
+    if (frame == 10) {
+        press(GLFW_KEY_TAB);
+        press(GLFW_KEY_6);
+        press(GLFW_KEY_C);
+        s.base = .0057f;
+        int width, height;
+        glfwGetWindowSize(w, &width, &height);
+        glfwSetWindowSize(w, width + 64, height + 48);
+    }
+    if (frame == 11) {
+        press(GLFW_KEY_1);
+        s.base = .0216f;
+    }
+    if (frame == 12) {
+        press(GLFW_KEY_6);
+        s.base = .0057f;
+    }
+    if (frame == 13) {
+        mouseButton(w, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, 0);
+        mouseMove(w, 100, 100);
+        mouseMove(w, 101, 101);
+        mouseButton(w, GLFW_MOUSE_BUTTON_RIGHT, GLFW_RELEASE, 0);
+        mouseButton(w, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, 0);
+        float yaw = in.yaw;
+        mouseMove(w, 2000, -2000);
+        if (in.yaw != yaw)
+            throw std::runtime_error("Recapturing the mouse changed the view");
+        focusCallback(w, GLFW_FALSE);
+    }
+    if (frame == 14) {
+        mouseMove(w, std::nan(""), 0);
+        in.yaw = std::nanf(""); // finite-pose guard must restore a usable camera
+    }
+    if (frame == 15)
+        press(GLFW_KEY_R);
 }
 void copyImage(VulkanContext &vk, Image &im, Buffer &buffer, VkImageLayout layout) {
     vk.imageBarrier(im, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -206,6 +350,30 @@ struct ReferenceCell {
     float nearestDepth = 1e30f;
 };
 using RootHistory = std::map<std::array<int32_t, 3>, int>;
+float sampleFootprint(const glm::vec4 *positions, uint32_t id, int width, int height) {
+    int x = int(id % uint32_t(width)), y = int(id / uint32_t(width));
+    glm::vec3 span(0), hit(positions[id]);
+    for (int axis = 0; axis < 2; axis++) {
+        glm::vec3 step(0);
+        float nearest = 3.402823e38f;
+        for (int sign : {-1, 1}) {
+            int nx = x + (axis == 0 ? sign : 0), ny = y + (axis == 1 ? sign : 0);
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height)
+                continue;
+            const auto &neighbor = positions[ny * width + nx];
+            if (neighbor.w == 0)
+                continue;
+            glm::vec3 delta = glm::vec3(neighbor) - hit;
+            float separation = glm::dot(delta, delta);
+            if (separation < nearest) {
+                nearest = separation;
+                step = glm::abs(delta);
+            }
+        }
+        span += step;
+    }
+    return 1.25f * std::max(span.x, std::max(span.y, span.z));
+}
 void verify(const Parameters &p, const Frame &f, const Readback &readback, const Counters &c,
             RootHistory &history) {
     if (c.vertexCount != 36 || c.firstVertex != 0 || c.firstInstance != 0)
@@ -218,6 +386,26 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
         throw std::runtime_error("Verification requires an unsaturated hash table");
     std::map<Cell, ReferenceCell> expected;
     RootHistory current;
+    // All samples in a world region must use its coarsest requested LOD.
+    for (uint32_t i = 0; i < uint32_t(p.extent.x * p.extent.y); i++)
+        if (positions[i].w != 0) {
+            glm::vec3 pos(positions[i]);
+            auto root4 = cell({pos.x, pos.y, pos.z}, p.config.x, p.flags.x - 1);
+            std::array<int32_t, 3> root = {root4[0], root4[1], root4[2]};
+            auto rc = center(root4, p.config.x);
+            auto old = history.find(root);
+            int previous = old == history.end() ? -1 : old->second;
+            int lod =
+                chooseLod(glm::distance(glm::vec3(rc[0], rc[1], rc[2]), glm::vec3(f.cameraTime)),
+                          p.config.y, p.flags.x, previous, p.config.z);
+            if (f.options.y != 0)
+                lod = std::max(
+                    lod, chooseCoverageLod(sampleFootprint(positions, i, p.extent.x, p.extent.y),
+                                           p.config.x, p.flags.x, previous, p.config.z));
+            auto [region, inserted] = current.emplace(root, lod);
+            if (!inserted)
+                region->second = std::max(region->second, lod);
+        }
     uint32_t hits = 0;
     std::array<uint32_t, 8> expectedLods{};
     for (uint32_t i = 0; i < uint32_t(p.extent.x * p.extent.y); i++)
@@ -225,16 +413,10 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
             glm::vec3 pos = glm::vec3(positions[i]);
             auto root4 = cell({pos.x, pos.y, pos.z}, p.config.x, p.flags.x - 1);
             std::array<int32_t, 3> root = {root4[0], root4[1], root4[2]};
-            auto centerArray = center(root4, p.config.x);
-            glm::vec3 rc(centerArray[0], centerArray[1], centerArray[2]);
-            auto old = history.find(root);
-            int expectedLod =
-                chooseLod(glm::distance(rc, glm::vec3(f.cameraTime)), p.config.y, p.flags.x,
-                          old == history.end() ? -1 : old->second, p.config.z);
+            int expectedLod = current.at(root);
             if (lods[i] != uint32_t(expectedLod))
                 throw std::runtime_error(
-                    "GPU LOD differs from world-root CPU hysteresis reference");
-            current[root] = expectedLod;
+                    "GPU LOD differs from world-root CPU coverage/hysteresis reference");
             auto key = cell({pos.x, pos.y, pos.z}, p.config.x, int(lods[i]));
             auto &ref = expected[key];
             hits++;
@@ -308,11 +490,13 @@ int main(int argc, char **argv) {
             Hud hud(vk, renderer.pass, voxelizer.setLayout);
             Readback readback(vk, opt.verify || opt.exercise);
             Settings &s = opt.settings;
-            Input input{&s, &hud};
+            glm::vec3 camera(5.8f, 3.6f, 8.4f);
+            Input input{&s, &hud, &camera};
             glfwSetWindowUserPointer(vk.window, &input);
             glfwSetKeyCallback(vk.window, keyCallback);
             glfwSetMouseButtonCallback(vk.window, mouseButton);
             glfwSetCursorPosCallback(vk.window, mouseMove);
+            glfwSetWindowFocusCallback(vk.window, focusCallback);
             VkQueryPool queries{};
             if (vk.timestampBits) {
                 VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -328,8 +512,7 @@ int main(int argc, char **argv) {
             RootHistory history;
             std::vector<Voxel> frozenSnapshot;
             Counters frozenCounts{};
-            int frozenChecks = 0, verifiedFrames = 0;
-            glm::vec3 camera(5.8f, 3.6f, 8.4f);
+            int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0;
             auto last = std::chrono::steady_clock::now();
             float animation = 0, fps = 60;
             int frameNumber = 0;
@@ -337,6 +520,8 @@ int main(int argc, char **argv) {
             while (!glfwWindowShouldClose(vk.window) &&
                    (opt.frames == 0 || frameNumber < opt.frames)) {
                 glfwPollEvents();
+                if (opt.exerciseControls && frameNumber < 16)
+                    exerciseControls(frameNumber, vk.window, input);
                 int fw, fh;
                 glfwGetFramebufferSize(vk.window, &fw, &fh);
                 if (fw == 0 || fh == 0) {
@@ -367,7 +552,8 @@ int main(int argc, char **argv) {
                 }
                 if (s.supersampling != previous.supersampling)
                     resize = true;
-                if (s.base != previous.base || s.levels != previous.levels) {
+                if (s.base != previous.base || s.levels != previous.levels ||
+                    s.adaptiveLod != previous.adaptiveLod) {
                     voxelizer.resetHistory = true;
                     history.clear();
                 }
@@ -387,12 +573,19 @@ int main(int argc, char **argv) {
                     history.clear();
                     resize = false;
                 }
+                if (!std::isfinite(camera.x) || !std::isfinite(camera.y) ||
+                    !std::isfinite(camera.z) || !std::isfinite(input.yaw) ||
+                    !std::isfinite(input.pitch))
+                    resetCamera(vk.window, input);
                 glm::vec3 forward(std::cos(input.pitch) * std::cos(input.yaw),
                                   std::sin(input.pitch),
                                   std::cos(input.pitch) * std::sin(input.yaw));
                 glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
                 float speed = glfwGetKey(vk.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 8.f : 3.f;
-                auto pressed = [&](int k) { return glfwGetKey(vk.window, k) == GLFW_PRESS; };
+                auto pressed = [&](int k) {
+                    return glfwGetWindowAttrib(vk.window, GLFW_FOCUSED) &&
+                           glfwGetKey(vk.window, k) == GLFW_PRESS;
+                };
                 camera += speed * moveDt *
                           (forward * float(pressed(GLFW_KEY_W) - pressed(GLFW_KEY_S)) +
                            right * float(pressed(GLFW_KEY_D) - pressed(GLFW_KEY_A)) +
@@ -413,7 +606,7 @@ int main(int argc, char **argv) {
                                                  glm::vec3(0, 1, 0), glm::vec3(0, 1, 0));
                 frame.cameraTime = glm::vec4(camera, time);
                 frame.light = glm::vec4(light, 1.15f);
-                frame.options = glm::vec4(float(s.lighting), 0, 0, 0);
+                frame.options = glm::vec4(float(s.lighting), s.adaptiveLod ? 1.f : 0.f, 0, 0);
                 std::memcpy(frameBuffer.mapped, &frame, sizeof(frame));
                 parameters.extent = {int(source.width), int(source.height),
                                      int(VisualVoxelizer::Capacity),
@@ -521,6 +714,13 @@ int main(int argc, char **argv) {
                     check(pr, "present");
                 vk.wait();
                 std::memcpy(&counts, readback.counters.mapped, sizeof(counts));
+                if (opt.exerciseControls && frameNumber < 16) {
+                    bool empty = frameNumber == 2 || frameNumber == 3;
+                    if ((counts.hits == 0) != empty || (!empty && counts.instanceCount == 0))
+                        throw std::runtime_error(
+                            "Source visibility did not survive camera/settings changes");
+                    controlChecks++;
+                }
                 if (queries) {
                     std::array<uint64_t, 7> stamps{};
                     check(vkGetQueryPoolResults(vk.device, queries, 0, 7, sizeof(stamps),
@@ -580,6 +780,9 @@ int main(int argc, char **argv) {
             if (opt.exercise)
                 std::cout << "Frozen camera-motion checks: " << frozenChecks
                           << "; closest colour and cube-light debug exercised\n";
+            if (opt.exerciseControls)
+                std::cout << "Camera reset, mouse capture/focus, settings and resize checks: "
+                          << controlChecks << '\n';
             if (timedFrames)
                 for (int i = 0; i < 6; i++)
                     totals[i] /= timedFrames;
@@ -606,6 +809,11 @@ int main(int argc, char **argv) {
                   << ",\n  \"dropped_root_history_samples\": " << counts.rootDropped
                   << ",\n  \"verified_frames\": " << verifiedFrames
                   << ",\n  \"freeze_checks\": " << frozenChecks
+                  << ",\n  \"control_checks\": " << controlChecks << ",\n  \"camera_position\": ["
+                  << camera.x << ", " << camera.y << ", " << camera.z << "]"
+                  << ",\n  \"camera_yaw\": " << input.yaw
+                  << ",\n  \"camera_pitch\": " << input.pitch
+                  << ",\n  \"adaptive_lod\": " << (s.adaptiveLod ? "true" : "false")
                   << ",\n  \"validation_errors\": " << vk.validationErrors
                   << ",\n  \"timestamp_supported\": " << (queries ? "true" : "false")
                   << ",\n  \"voxels_per_lod\": [";

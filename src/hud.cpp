@@ -70,7 +70,7 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
     mesh.clear();
     if (!s.visibleHud)
         return;
-    rect(8, 8, 430, 286, {.01f, .018f, .03f, .90f});
+    rect(8, 8, 430, 306, {.01f, .018f, .03f, .90f});
     text(18, 18, "MICROVOXELS - CONTINUOUS SOURCE / UNLIT CUBES", {.30f, .88f, .70f, 1});
     for (int i = 0; i < 3; i++) {
         rect(18 + 140 * i, 37, 130, 21,
@@ -105,6 +105,10 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
          "DROPPED " + std::to_string(c.dropped) + "  ROOT DROPPED " +
              std::to_string(c.rootDropped));
     text(18, 272, "WASD QE / RIGHT MOUSE LOOK / F1 HIDE HUD");
+    text(18, 290,
+         c.hits == 0
+             ? "NO SOURCE HITS - R: RESET VIEW"
+             : std::string("R: RESET VIEW / C: ADAPTIVE LOD ") + (s.adaptiveLod ? "ON" : "OFF"));
     if (mesh.size() * sizeof(HudVertex) > vertices.size)
         throw std::runtime_error("HUD buffer too small");
     std::memcpy(vertices.mapped, mesh.data(), mesh.size() * sizeof(HudVertex));

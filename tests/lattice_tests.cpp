@@ -26,5 +26,12 @@ int main() {
     require(chooseLod(7.f, 8.f, 5, 1) == 0, "Coarse should refine below lower threshold");
     require(chooseLod(9.f, 8.f, 5, 0) == 1, "Fine should coarsen above upper threshold");
     require(chooseLod(100.f, 8.f, 3, 0) == 2, "Large camera jumps must traverse all thresholds");
+    require(chooseCoverageLod(.007f, .01f, 5) == 0, "Dense samples should retain small cells");
+    require(chooseCoverageLod(.021f, .01f, 5) == 2, "Cells must cover the source sample spacing");
+    require(chooseCoverageLod(.019f, .01f, 5, 2) == 2,
+            "Coverage LOD must persist inside its hysteresis band");
+    require(chooseCoverageLod(.017f, .01f, 5, 2) == 1,
+            "Coverage LOD should refine when sampling becomes denser");
+    require(chooseCoverageLod(2.f, .01f, 3) == 2, "Coverage must respect the enabled level count");
     std::cout << "Negative coordinates, nesting, occupancy, hysteresis and camera jumps passed\n";
 }

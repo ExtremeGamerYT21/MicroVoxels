@@ -11,7 +11,7 @@ if(MICROVOXELS_BUILD_DEMO)
   find_package(Vulkan REQUIRED COMPONENTS glslangValidator)
   find_package(glfw3 3.3 REQUIRED)
   find_package(glm CONFIG REQUIRED)
-  set(SHADER_FILES source.vert source.frag shadow.vert voxel.vert voxel.frag voxel_debug.vert voxel_debug.frag fullscreen.vert fullscreen.frag hud.vert hud.frag lod.comp voxelize.comp compact.comp)
+  set(SHADER_FILES source.vert source.frag shadow.vert voxel.vert voxel.frag voxel_debug.vert voxel_debug.frag fullscreen.vert fullscreen.frag hud.vert hud.frag lod.comp lod_resolve.comp voxelize.comp compact.comp)
   foreach(SHADER IN LISTS SHADER_FILES)
     set(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/shaders/${SHADER}.spv")
     add_custom_command(OUTPUT "${OUTPUT}" COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders"

@@ -26,6 +26,11 @@ jobs:
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/ci.json
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --supersampling --frames 3 --width 320 --height 240 --no-ui --report captures/supersampling.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --report captures/controls.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --no-adaptive-lod --frames 3 --width 480 --height 360 --no-ui --report captures/distance-lod.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/gaps-before.ppm
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/gaps-after.ppm
+          python3 tests/render_coverage.py captures/gaps-before.ppm captures/gaps-after.ppm captures/coverage.json
       - uses: actions/upload-artifact@v4
         with:
           name: verification-reports

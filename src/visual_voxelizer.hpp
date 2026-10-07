@@ -4,7 +4,7 @@ namespace micro {
 class VisualVoxelizer {
     VulkanContext &vk;
     Buffer &frame;
-    VkPipeline lodPipeline{}, hashPipeline{}, compactPipeline{};
+    VkPipeline lodPipeline{}, resolveLodPipeline{}, hashPipeline{}, compactPipeline{};
 
   public:
     static constexpr uint32_t Capacity = 1 << 20, RootCapacity = 1 << 18;

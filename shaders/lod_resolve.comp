@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "lattice.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D positions;
+layout(set = 0, binding = 4, r32ui) uniform writeonly uimage2D currentLods;
+layout(set = 0, binding = 5, std430) readonly buffer CurrentRoots {
+    Root currentRoots[];
+};
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, params.extent.xy)))
+        return;
+    vec4 hit = texelFetch(positions, p, 0);
+    uint lod = 0;
+    if (hit.w != 0) {
+        ivec3 root = rootCell(hit.xyz);
+        uint slot = hashKey(ivec4(root, 0)) & (ROOT_CAPACITY - 1);
+        // Saturated metadata falls back consistently to the coarsest level.
+        lod = uint(params.flags.x - 1);
+        for (uint i = 0; i < 64; i++) {
+            Root region = currentRoots[(slot + i) & (ROOT_CAPACITY - 1)];
+            if (region.owner == 0)
+                break;
+            if (all(equal(rootCell(texelFetch(positions, pixel(region.owner - 1), 0).xyz), root))) {
+                lod = region.lod;
+                break;
+            }
+        }
+    }
+    imageStore(currentLods, p, uvec4(lod));
+}
