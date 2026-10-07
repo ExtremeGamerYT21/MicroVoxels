@@ -1,6 +1,5 @@
 #include "hud.hpp"
 #include "lattice.hpp"
-#include "packed_voxel.hpp"
 #include "source_renderer.hpp"
 #include "surface_footprint.hpp"
 #include "voxel_renderer.hpp"
@@ -14,7 +13,6 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <stdexcept>
 using namespace micro;
@@ -22,8 +20,6 @@ struct Options {
     int width = 1100, height = 720, frames = 0;
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
          exerciseControls = false, exerciseStability = false;
-    bool legacyCompaction = false, packed = true, touchedClear = true, forceTouchedClear = false,
-         localDedup = false, depthSource = false, depthTiles = true, profileStages = false;
     float fixedTime = -1;
     std::string screenshot, report, captureSequence;
     Settings settings;
@@ -43,24 +39,6 @@ Options parse(int argc, char **argv) {
             o.height = std::stoi(value());
         else if (a == "--frames")
             o.frames = std::stoi(value());
-        else if (a == "--depth-source")
-            o.depthSource = true;
-        else if (a == "--no-depth-tiles")
-            o.depthTiles = false;
-        else if (a == "--legacy-compaction")
-            o.legacyCompaction = true;
-        else if (a == "--full-clear") {
-            o.touchedClear = false;
-            o.forceTouchedClear = false;
-        } else if (a == "--touched-clear") {
-            o.touchedClear = true;
-            o.forceTouchedClear = true;
-        } else if (a == "--unpacked")
-            o.packed = false;
-        else if (a == "--local-dedup")
-            o.localDedup = true;
-        else if (a == "--profile-stages")
-            o.profileStages = true;
         else if (a == "--hidden")
             o.hidden = true;
         else if (a == "--verify")
@@ -120,9 +98,6 @@ Options parse(int argc, char **argv) {
                    "1..64\n"
                 << "--capture-sequence DIRECTORY --no-adaptive-lod --exercise-controls (16 frames) "
                    "--exercise-stability (12 frames)\n"
-                << "--legacy-compaction --unpacked --full-clear --touched-clear --local-dedup\n"
-                << "--profile-stages (serialize timestamps to isolate pass costs)\n"
-                << "--depth-source --no-depth-tiles (experimental position-provider benchmark)\n"
                 << "WASD/QE fly; right mouse look; Tab view; F freeze; G cube-light debug;\n"
                 << "O average/closest; X supersampling; H lighting; P pause; +/- voxel size;\n"
                 << "[/] LOD distance; 1..6 LOD count; R reset view; C adaptive LOD; F1 HUD; Esc "
@@ -375,13 +350,10 @@ void copyImage(VulkanContext &vk, Image &im, Buffer &buffer, VkImageLayout layou
 struct Readback {
     VulkanContext &vk;
     Buffer counters, instances, positions, colors, lods, pixels, depths;
-    bool packed;
-    uint32_t instanceStride;
-    Readback(VulkanContext &context, bool verify, bool compact)
-        : vk(context), packed(compact), instanceStride(compact ? 16 : 32) {
+    Readback(VulkanContext &context, bool verify) : vk(context) {
         counters = vk.buffer(sizeof(Counters), VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
         if (verify)
-            instances = vk.buffer(VisualVoxelizer::Capacity * uint64_t(instanceStride),
+            instances = vk.buffer(VisualVoxelizer::Capacity * sizeof(Voxel),
                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
     }
     void resize(uint32_t w, uint32_t h, VkExtent2D display, bool verify, bool capture) {
@@ -402,29 +374,20 @@ struct Readback {
             vk.destroy(*b);
     }
 };
-Voxel instanceAt(const Readback &r, uint32_t i, float base, float splat = 1) {
-    if (!r.packed)
-        return static_cast<const Voxel *>(r.instances.mapped)[i];
-    auto &v = static_cast<const PackedVoxel *>(r.instances.mapped)[i];
-    auto cell = unpackCell(v);
-    float h = std::ldexp(base, cell[3]);
-    return {{(cell[0] + .5f) * h, (cell[1] + .5f) * h, (cell[2] + .5f) * h, h * splat},
-            unpackColor(v)};
-}
 struct ReferenceCell {
     uint64_t r{}, g{}, b{}, count{};
     uint32_t nearest = UINT32_MAX;
     float nearestDepth = 1e30f;
-    std::vector<uint32_t> contributors;
 };
 using RootHistory = std::map<std::array<int32_t, 3>, int>;
 void verify(const Parameters &p, const Frame &f, const Readback &readback, const Counters &c,
-            RootHistory &history, float &reconstructionError, uint32_t &closestNumericTies) {
+            RootHistory &history, float &reconstructionError) {
     if (c.vertexCount != 36 || c.firstVertex != 0 || c.firstInstance != 0)
         throw std::runtime_error("Invalid GPU indirect cube draw command");
     auto *positions = static_cast<const glm::vec4 *>(readback.positions.mapped);
     auto *colors = static_cast<const glm::vec4 *>(readback.colors.mapped);
     auto *lods = static_cast<const uint32_t *>(readback.lods.mapped);
+    auto *instances = static_cast<const Voxel *>(readback.instances.mapped);
     auto *depths = static_cast<const float *>(readback.depths.mapped);
     auto inverse = glm::inverse(f.vp);
     // Raster edge snapping and attribute interpolation are not exact inverse projection.
@@ -499,8 +462,6 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
                 candidates++;
                 emitted++;
                 ref.count++;
-                if (p.flags.y == 0)
-                    ref.contributors.push_back(i);
                 ref.r += uint32_t(std::round(std::clamp(colors[i].r, 0.f, 1.f) * 1023));
                 ref.g += uint32_t(std::round(std::clamp(colors[i].g, 0.f, 1.f) * 1023));
                 ref.b += uint32_t(std::round(std::clamp(colors[i].b, 0.f, 1.f) * 1023));
@@ -549,7 +510,7 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
     if (hits != c.hits || expected.size() != c.instanceCount)
         throw std::runtime_error("GPU hit or unique-cell count differs from CPU reference");
     for (uint32_t i = 0; i < c.instanceCount; i++) {
-        auto v = instanceAt(readback, i, p.config.x, p.config.w);
+        auto &v = instances[i];
         int lod = int(std::round(std::log2(v.centerSize.w / (p.config.x * p.config.w))));
         auto key = cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, p.config.x, lod);
         auto found = expected.find(key);
@@ -562,34 +523,9 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
                 throw std::runtime_error("Voxel lattice centre mismatch");
         glm::vec3 wanted = p.flags.y ? glm::vec3(ref.r, ref.g, ref.b) / (1023.f * float(ref.count))
                                      : glm::vec3(colors[ref.nearest]);
-        bool rgbMatches =
-            glm::all(glm::lessThanEqual(glm::abs(glm::vec3(v.rgba) - wanted), glm::vec3(.0021f)));
-        if (!rgbMatches && p.flags.y == 0) {
-            // CPU/GPU sqrt and dot products can distinguish distances that round
-            // to the same CPU float. Accept only an actual contributor at the
-            // minimum distance within four float epsilons, with matching source RGB.
-            float tolerance =
-                4 * std::numeric_limits<float>::epsilon() * std::max(1.f, ref.nearestDepth);
-            for (uint32_t pixel : ref.contributors) {
-                float d = glm::distance(glm::vec3(positions[pixel]), glm::vec3(f.cameraTime));
-                if (d <= ref.nearestDepth + tolerance &&
-                    glm::all(
-                        glm::lessThanEqual(glm::abs(glm::vec3(v.rgba) - glm::vec3(colors[pixel])),
-                                           glm::vec3(.0021f)))) {
-                    rgbMatches = true;
-                    closestNumericTies++;
-                    break;
-                }
-            }
-        }
-        if (!rgbMatches) {
-            throw std::runtime_error(
-                "Voxel RGB differs from source-sample reduction: cell " + std::to_string(key[0]) +
-                "," + std::to_string(key[1]) + "," + std::to_string(key[2]) + " actual red " +
-                std::to_string(v.rgba.r) + " expected red " + std::to_string(wanted.r) +
-                " nearest pixel " + std::to_string(ref.nearest) + " distance " +
-                std::to_string(ref.nearestDepth));
-        }
+        for (int axis = 0; axis < 3; axis++)
+            if (std::abs(v.rgba[axis] - wanted[axis]) > .0021f)
+                throw std::runtime_error("Voxel RGB differs from source-sample reduction");
         if (v.rgba.w != 1)
             throw std::runtime_error("Unexpected opacity");
         expectedLods[lod]++;
@@ -646,11 +582,11 @@ int main(int argc, char **argv) {
         BufferCleanup frameCleanup{vk, frameBuffer};
         {
             SourceWorld world;
-            SourceRenderer source(vk, world, frameBuffer, opt.depthSource);
-            VisualVoxelizer voxelizer(vk, frameBuffer, opt.packed, opt.verify && opt.depthSource);
+            SourceRenderer source(vk, world, frameBuffer);
+            VisualVoxelizer voxelizer(vk, frameBuffer);
             VoxelRenderer renderer(vk, voxelizer);
             Hud hud(vk, renderer.pass, voxelizer.setLayout);
-            Readback readback(vk, opt.verify || opt.exercise, opt.packed);
+            Readback readback(vk, opt.verify || opt.exercise);
             Settings &s = opt.settings;
             glm::vec3 camera(5.8f, 3.6f, 8.4f);
             Input input{&s, &hud, &camera};
@@ -664,7 +600,7 @@ int main(int argc, char **argv) {
             if (vk.timestampBits) {
                 VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-                ci.queryCount = 14;
+                ci.queryCount = 9;
                 check(vkCreateQueryPool(vk.device, &ci, nullptr, &queries), "timestamp query pool");
             }
             bool resize = true;
@@ -673,18 +609,12 @@ int main(int argc, char **argv) {
             std::array<double, 6> times{}, totals{};
             int timedFrames = 0;
             double cubeDrawTime = 0, cubeDrawTotal = 0;
-            double wallTotal = 0;
-            int wallFrames = 0;
-            std::array<double, 8> detailed{}, detailedTotals{};
             RootHistory history;
-            std::vector<uint8_t> frozenSnapshot;
+            std::vector<Voxel> frozenSnapshot;
             Counters frozenCounts{};
             int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0, stabilityChecks = 0;
             uint64_t motionAdded = 0, motionRemoved = 0;
             float reconstructionError = 0;
-            uint32_t closestNumericTies = 0;
-            uint32_t touchedClearFrames = 0, fullClearFrames = 0;
-            glm::mat4 previousInverseVP(1);
             std::map<Cell, glm::vec4> stableCells;
             std::map<Cell, glm::vec4> stationaryCloud;
             auto last = std::chrono::steady_clock::now();
@@ -791,8 +721,6 @@ int main(int argc, char **argv) {
                 lp[1][1] *= -1;
                 frame.lightVP = lp * glm::lookAt(glm::vec3(0, 1, 0) + light * 13.f,
                                                  glm::vec3(0, 1, 0), glm::vec3(0, 1, 0));
-                frame.inverseVP = glm::inverse(frame.vp);
-                frame.previousInverseVP = previousInverseVP;
                 frame.cameraTime = glm::vec4(camera, time);
                 frame.light = glm::vec4(light, 1.15f);
                 frame.options =
@@ -804,24 +732,13 @@ int main(int argc, char **argv) {
                                      int(VisualVoxelizer::Capacity)};
                 parameters.config = {s.base, s.distance, .1f, s.splat};
                 parameters.flags = {s.levels, s.average ? 1 : 0, s.cubeLight ? 1 : 0, s.mode};
-                parameters.footprint = {s.footprintRadius, s.footprintLimit, opt.depthSource,
-                                        (opt.depthTiles ? 1 : 0) |
-                                            (opt.verify && opt.depthSource ? 2 : 0) |
-                                            (opt.profileStages ? 4 : 0)};
-                // The previous count is already read for the HUD. No additional
-                // GPU readback is needed to avoid scattered clears of dense clouds.
-                bool sparseClear =
-                    opt.touchedClear &&
-                    (opt.forceTouchedClear || counts.instanceCount < VisualVoxelizer::Capacity / 4);
-                parameters.optimization = {opt.legacyCompaction, opt.packed,
-                                           (sparseClear ? 1 : 0) | (opt.touchedClear ? 2 : 0),
-                                           opt.localDedup};
+                parameters.footprint = {s.footprintRadius, s.footprintLimit, 0, 0};
                 bool generating = !s.frozen || !voxelizer.cloudReady;
                 bool referenceReset = voxelizer.resetHistory;
                 if (referenceReset)
                     history.clear();
                 hud.build(s, counts, times, world.triangleCount(), source.width, source.height, fps,
-                          cubeDrawTime, voxelizer.instanceStride, detailed, opt.profileStages);
+                          cubeDrawTime);
                 uint32_t swapIndex;
                 VkResult acquired = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
                                                           vk.acquired, VK_NULL_HANDLE, &swapIndex);
@@ -834,25 +751,26 @@ int main(int argc, char **argv) {
                     check(acquired, "acquire image");
                 vk.begin();
                 if (queries) {
-                    vkCmdResetQueryPool(vk.cmd, queries, 0, 14);
-                    vk.timestamp(queries, 0, opt.profileStages, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+                    vkCmdResetQueryPool(vk.cmd, queries, 0, 9);
+                    vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
                 }
                 source.render(voxelizer.current, parameters);
                 if (queries)
-                    vk.timestamp(queries, 1, opt.profileStages);
+                    vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
                 if (generating)
                     voxelizer.generate(parameters, queries);
                 else if (queries)
-                    for (uint32_t i : {13u, 9u, 10u, 2u, 3u, 11u, 12u, 4u})
-                        vk.timestamp(queries, i, opt.profileStages);
+                    for (uint32_t i = 2; i <= 4; i++)
+                        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries,
+                                            i);
                 renderer.begin(parameters);
                 renderer.draw(parameters, queries);
                 if (queries)
-                    vk.timestamp(queries, 5, opt.profileStages);
+                    vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 5);
                 hud.draw();
                 renderer.end();
                 if (queries)
-                    vk.timestamp(queries, 6, opt.profileStages);
+                    vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 6);
                 vk.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
                 VkBufferCopy counterCopy{0, 0, sizeof(Counters)};
@@ -864,19 +782,14 @@ int main(int argc, char **argv) {
                                     1, &c);
                 }
                 if (opt.verify && generating) {
-                    if (opt.depthSource) {
-                        VkBufferCopy c{0, 0, readback.positions.size};
-                        vkCmdCopyBuffer(vk.cmd, voxelizer.reconstructedSamples.handle,
-                                        readback.positions.handle, 1, &c);
-                    } else
-                        copyImage(vk, source.positions[voxelizer.current], readback.positions,
-                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    copyImage(vk, source.positions[voxelizer.current], readback.positions,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     copyImage(vk, source.color, readback.colors,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     copyImage(vk, voxelizer.lods[voxelizer.current], readback.lods,
                               VK_IMAGE_LAYOUT_GENERAL);
-                    copyImage(vk, source.depthFor(voxelizer.current), readback.depths,
-                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+                    copyImage(vk, source.depth, readback.depths,
+                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
                 }
                 if (!opt.screenshot.empty() || !opt.captureSequence.empty())
                     copyImage(vk, renderer.output, readback.pixels,
@@ -923,12 +836,6 @@ int main(int argc, char **argv) {
                     check(pr, "present");
                 vk.wait();
                 std::memcpy(&counts, readback.counters.mapped, sizeof(counts));
-                if (generating) {
-                    if (voxelizer.cloudTouchedClear)
-                        touchedClearFrames++;
-                    else
-                        fullClearFrames++;
-                }
                 if (opt.exerciseControls && frameNumber < 16) {
                     bool empty = frameNumber == 2 || frameNumber == 3;
                     if ((counts.hits == 0) != empty || (!empty && counts.instanceCount == 0))
@@ -937,8 +844,8 @@ int main(int argc, char **argv) {
                     controlChecks++;
                 }
                 if (queries) {
-                    std::array<uint64_t, 14> stamps{};
-                    check(vkGetQueryPoolResults(vk.device, queries, 0, 14, sizeof(stamps),
+                    std::array<uint64_t, 9> stamps{};
+                    check(vkGetQueryPoolResults(vk.device, queries, 0, 9, sizeof(stamps),
                                                 stamps.data(), 8,
                                                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
                           "read timestamps");
@@ -950,20 +857,7 @@ int main(int argc, char **argv) {
                             double((stamps[i + 1] - stamps[i]) & mask) * vk.timestampPeriod / 1e6;
                     cubeDrawTime =
                         double((stamps[8] - stamps[7]) & mask) * vk.timestampPeriod / 1e6;
-                    auto milliseconds = [&](int a, int b) {
-                        return double((stamps[b] - stamps[a]) & mask) * vk.timestampPeriod / 1e6;
-                    };
-                    detailed = {milliseconds(1, 13),
-                                milliseconds(13, 9),
-                                milliseconds(9, 10),
-                                milliseconds(10, 2),
-                                milliseconds(2, 3),
-                                opt.legacyCompaction ? milliseconds(3, 11) : 0,
-                                opt.legacyCompaction ? milliseconds(11, 12) : 0,
-                                opt.legacyCompaction ? milliseconds(12, 4) : milliseconds(3, 4)};
                     if (frameNumber >= 2 && generating) {
-                        for (int i = 0; i < 8; i++)
-                            detailedTotals[i] += detailed[i];
                         for (int i = 0; i < 6; i++)
                             totals[i] += times[i];
                         cubeDrawTotal += cubeDrawTime;
@@ -977,16 +871,16 @@ int main(int argc, char **argv) {
                     screenshot(name.str(), vk, readback);
                 }
                 if (opt.verify && generating) {
-                    verify(parameters, frame, readback, counts, history, reconstructionError,
-                           closestNumericTies);
+                    verify(parameters, frame, readback, counts, history, reconstructionError);
                     verifiedFrames++;
                 }
                 if (opt.exerciseStability && frameNumber < 12) {
                     if (!generating)
                         throw std::runtime_error("Stability test froze generation");
                     std::map<Cell, glm::vec4> cloud, patch;
+                    auto *data = static_cast<const Voxel *>(readback.instances.mapped);
                     for (uint32_t i = 0; i < counts.instanceCount; i++) {
-                        auto v = instanceAt(readback, i, voxelizer.cloudBase, voxelizer.cloudSplat);
+                        const auto &v = data[i];
                         auto key =
                             cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, s.base, 0);
                         cloud.emplace(key, v.rgba);
@@ -1015,30 +909,22 @@ int main(int argc, char **argv) {
                     stableCells = std::move(patch);
                 }
                 if (opt.exercise) {
-                    auto *data = static_cast<const uint8_t *>(readback.instances.mapped);
+                    auto *data = static_cast<const Voxel *>(readback.instances.mapped);
                     if (frameNumber == 1) {
-                        frozenSnapshot.assign(data, data + uint64_t(counts.instanceCount) *
-                                                               voxelizer.instanceStride);
+                        frozenSnapshot.assign(data, data + counts.instanceCount);
                         frozenCounts = counts;
                     }
                     if (frameNumber >= 2 && frameNumber <= 4) {
                         if (std::memcmp(&counts, &frozenCounts, sizeof(counts)) != 0 ||
-                            std::memcmp(data, frozenSnapshot.data(), frozenSnapshot.size()) != 0)
+                            std::memcmp(data, frozenSnapshot.data(),
+                                        frozenSnapshot.size() * sizeof(Voxel)) != 0)
                             throw std::runtime_error("Freeze changed cloud contents or counters");
                         frozenChecks++;
                     }
                 }
-                if (generating) {
-                    previousInverseVP = frame.inverseVP;
+                if (generating)
                     voxelizer.advance();
-                }
                 previous = s;
-                if (frameNumber >= 2) {
-                    wallTotal += std::chrono::duration<double, std::milli>(
-                                     std::chrono::steady_clock::now() - now)
-                                     .count();
-                    wallFrames++;
-                }
                 frameNumber++;
                 std::string title = "Microvoxels | " + std::to_string(counts.instanceCount) +
                                     " unlit cubes | " + std::to_string(counts.hits) + " hits | " +
@@ -1071,9 +957,6 @@ int main(int argc, char **argv) {
                     totals[i] /= timedFrames;
             if (timedFrames)
                 cubeDrawTotal /= timedFrames;
-            if (timedFrames)
-                for (auto &v : detailedTotals)
-                    v /= timedFrames;
             const char *labels[] = {"source_and_shadow_ms", "lod_and_clear_ms", "hash_ms",
                                     "compact_ms",           "final_render_ms",  "hud_ms"};
             if (!opt.report.empty()) {
@@ -1096,7 +979,6 @@ int main(int argc, char **argv) {
                   << ",\n  \"dropped_hits\": " << counts.dropped
                   << ",\n  \"dropped_root_history_samples\": " << counts.rootDropped
                   << ",\n  \"verified_frames\": " << verifiedFrames
-                  << ",\n  \"closest_numeric_reference_ties\": " << closestNumericTies
                   << ",\n  \"freeze_checks\": " << frozenChecks
                   << ",\n  \"control_checks\": " << controlChecks << ",\n  \"camera_position\": ["
                   << camera.x << ", " << camera.y << ", " << camera.z << "]"
@@ -1117,12 +999,6 @@ int main(int argc, char **argv) {
                   << ",\n  \"footprint_write_limit\": " << s.footprintLimit
                   << ",\n  \"source_width\": " << source.width
                   << ",\n  \"source_height\": " << source.height
-                  << ",\n  \"base_pitch_m\": " << voxelizer.cloudBase
-                  << ",\n  \"lod_distance_m\": " << s.distance
-                  << ",\n  \"lod_levels\": " << s.levels << ",\n  \"color_reduction\": \""
-                  << (s.average ? "average" : "closest") << "\""
-                  << ",\n  \"supersampling\": " << (s.supersampling ? "true" : "false")
-                  << ",\n  \"compute_passes_per_generation\": " << voxelizer.cloudComputePasses
                   << ",\n  \"depth_reconstruction_max_error_m\": "
                   << (opt.verify ? std::to_string(reconstructionError) : "null")
                   << ",\n  \"motion_patch_cell_additions\": " << motionAdded
@@ -1136,58 +1012,13 @@ int main(int argc, char **argv) {
                   << ",\n  \"adaptive_lod\": " << (s.adaptiveLod ? "true" : "false")
                   << ",\n  \"validation_errors\": " << vk.validationErrors
                   << ",\n  \"timestamp_supported\": " << (queries ? "true" : "false")
-                  << ",\n  \"isolated_stage_timestamps\": "
-                  << (opt.profileStages ? "true" : "false")
-                  << ",\n  \"wall_frame_ms\": " << (wallFrames ? wallTotal / wallFrames : 0)
-                  << ",\n  \"fps\": " << (wallTotal ? 1000.0 * wallFrames / wallTotal : 0)
                   << ",\n  \"voxels_per_lod\": [";
                 for (int i = 0; i < s.levels; i++)
                     f << (i ? ", " : "") << counts.perLod[i];
                 f << "],\n  \"average_gpu_timings\": {";
                 for (int i = 0; i < 6; i++)
                     f << (i ? ", " : "") << "\"" << labels[i] << "\": " << totals[i];
-                f << "},\n  \"stage_gpu_timings\": {";
-                const char *stageLabels[] = {
-                    "hash_clear_ms",
-                    "root_and_counter_clear_ms",
-                    "lod_selection_ms",
-                    "lod_resolve_ms",
-                    "voxelize_and_dedup_ms",
-                    "compact_counts_ms",
-                    "compact_prefix_ms",
-                    opt.legacyCompaction ? "compact_write_ms" : "resolve_unique_ms"};
-                for (int i = 0; i < 8; i++)
-                    f << (i ? ", " : "") << "\"" << stageLabels[i] << "\": " << detailedTotals[i];
-                f << "},\n  \"global_hash_attempts\": " << counts.globalHashAttempts
-                  << ",\n  \"hash_probe_count\": " << counts.hashProbes
-                  << ",\n  \"hash_load_factor\": "
-                  << double(counts.instanceCount) / VisualVoxelizer::Capacity
-                  << ",\n  \"contributors_per_unique_voxel\": "
-                  << (counts.instanceCount ? double(counts.candidateWrites) / counts.instanceCount
-                                           : 0)
-                  << ",\n  \"instance_bytes_per_voxel\": " << voxelizer.instanceStride
-                  << ",\n  \"active_instance_bytes\": "
-                  << uint64_t(counts.instanceCount) * voxelizer.instanceStride
-                  << ",\n  \"allocated_instance_bytes\": " << voxelizer.instances.size
-                  << ",\n  \"hash_table_bytes\": " << voxelizer.slots.size
-                  << ",\n  \"unique_slot_buffer_bytes\": " << voxelizer.uniqueSlots.size
-                  << ",\n  \"local_dedup\": " << (opt.localDedup ? "true" : "false")
-                  << ",\n  \"local_dedup_fallbacks\": " << counts.localFallbacks
-                  << ",\n  \"compaction_mode\": \"" << (opt.legacyCompaction ? "scan" : "append")
-                  << "\""
-                  << ",\n  \"hash_clear_mode\": \""
-                  << (voxelizer.cloudTouchedClear ? "touched" : "full") << "\""
-                  << ",\n  \"hash_clear_policy\": \""
-                  << (!opt.touchedClear       ? "full"
-                      : opt.forceTouchedClear ? "touched"
-                                              : "auto")
-                  << "\""
-                  << ",\n  \"touched_clear_frames\": " << touchedClearFrames
-                  << ",\n  \"full_clear_frames\": " << fullClearFrames
-                  << ",\n  \"position_provider\": \"" << (opt.depthSource ? "depth" : "cached-xyz")
-                  << "\""
-                  << ",\n  \"depth_tiles\": "
-                  << (opt.depthSource && opt.depthTiles ? "true" : "false") << "\n}\n";
+                f << "}\n}\n";
             }
             if (queries) {
                 vkDestroyQueryPool(vk.device, queries, nullptr);

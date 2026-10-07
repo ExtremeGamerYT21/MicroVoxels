@@ -13,7 +13,12 @@ struct Slot {
 layout(set = 0, binding = 8, std430) readonly buffer Hash {
     Slot slots[];
 };
-#include "instance_output.glsl"
+struct Voxel {
+    vec4 centerSize, rgba;
+};
+layout(set = 0, binding = 10, std430) writeonly buffer Instances {
+    Voxel voxels[];
+};
 layout(set = 0, binding = 11, std430) readonly buffer Groups {
     uint offsets[];
 };
@@ -32,12 +37,14 @@ void main() {
     if (!valid)
         return;
     ivec2 p = ownerPixel(slots[s].owner);
-    ivec4 key = voxelKey(sourcePosition(p).xyz, imageLoad(lods, p).r);
+    ivec4 key = voxelKey(texelFetch(positions, p, 0).xyz, imageLoad(lods, p).r);
     key.xyz += ownerOffset(slots[s].owner);
     uint lod = uint(key.w), idx = offsets[gl_WorkGroupID.x] + scan[local] - 1u;
+    float h = params.config.x * exp2(float(lod));
     vec3 rgb = params.flags.y == 1
                    ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
                    : texelFetch(colors, ownerPixel(slots[s].nearest), 0).rgb;
-    storeInstance(idx, key, rgb);
+    voxels[idx].centerSize = vec4((vec3(key.xyz) + .5) * h, h * params.config.w);
+    voxels[idx].rgba = vec4(rgb, 1);
     atomicAdd(perLod[lod], 1u);
 }

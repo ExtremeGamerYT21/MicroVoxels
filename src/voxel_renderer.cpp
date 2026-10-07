@@ -23,22 +23,20 @@ VoxelRenderer::VoxelRenderer(VulkanContext &context, VisualVoxelizer &v)
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &cr;
     sub.pDepthStencilAttachment = &dr;
-    VkSubpassDependency deps[3] = {
+    VkSubpassDependency deps[2] = {
         {VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, 0},
         {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-         VK_ACCESS_TRANSFER_READ_BIT, 0},
-        // Allows optional isolated timestamp barriers around cube/HUD draws.
-        {0, 0, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, 0}};
+         VK_ACCESS_TRANSFER_READ_BIT, 0}};
     VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
     ci.attachmentCount = 2;
     ci.pAttachments = attachments;
     ci.subpassCount = 1;
     ci.pSubpasses = &sub;
-    ci.dependencyCount = 3;
+    ci.dependencyCount = 2;
     ci.pDependencies = deps;
     check(vkCreateRenderPass(vk.device, &ci, nullptr, &pass), "voxel render pass");
     cubes = vk.graphics(v.layout, pass, "voxel.vert", "voxel.frag", 1, true);
@@ -76,10 +74,7 @@ void VoxelRenderer::begin(const Parameters &) {
     bi.pClearValues = clear;
     vkCmdBeginRenderPass(vk.cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
 }
-void VoxelRenderer::draw(const Parameters &parameters, VkQueryPool queries) {
-    Parameters p = parameters;
-    p.config.x = voxelizer.cloudBase;
-    p.config.w = voxelizer.cloudSplat;
+void VoxelRenderer::draw(const Parameters &p, VkQueryPool queries) {
     vkCmdBindDescriptorSets(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, voxelizer.layout, 0, 1,
                             &voxelizer.sets[voxelizer.current], 0, nullptr);
     vkCmdPushConstants(vk.cmd, voxelizer.layout, VK_SHADER_STAGE_ALL, 0, sizeof(p), &p);
@@ -90,7 +85,7 @@ void VoxelRenderer::draw(const Parameters &parameters, VkQueryPool queries) {
         vkCmdDraw(vk.cmd, 3, 1, 0, 0);
     }
     if (queries)
-        vk.timestamp(queries, 7, (p.footprint.w & 4) != 0);
+        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 7);
     if (p.flags.w == 1 || p.flags.w == 2) {
         float half = float(vk.extent.width / 2);
         vk.viewport(p.flags.w == 2 ? half : 0, 0, p.flags.w == 2 ? w - half : w, h);
@@ -98,7 +93,7 @@ void VoxelRenderer::draw(const Parameters &parameters, VkQueryPool queries) {
         vkCmdDrawIndirect(vk.cmd, voxelizer.counters.handle, 0, 1, sizeof(VkDrawIndirectCommand));
     }
     if (queries)
-        vk.timestamp(queries, 8, (p.footprint.w & 4) != 0);
+        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 8);
 }
 void VoxelRenderer::end() {
     vkCmdEndRenderPass(vk.cmd);

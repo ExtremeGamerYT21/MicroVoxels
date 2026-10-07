@@ -30,8 +30,7 @@ static const std::map<char, std::array<uint8_t, 7>> font = {
     {'.', {0, 0, 0, 0, 0, 12, 12}},      {':', {0, 12, 12, 0, 12, 12, 0}},
     {'-', {0, 0, 0, 31, 0, 0, 0}},       {'/', {1, 2, 2, 4, 8, 8, 16}},
     {'+', {0, 4, 4, 31, 4, 4, 0}},       {'[', {14, 8, 8, 8, 8, 8, 14}},
-    {']', {14, 2, 2, 2, 2, 2, 14}},      {'=', {0, 0, 31, 0, 31, 0, 0}},
-    {'%', {25, 25, 2, 4, 8, 19, 19}}};
+    {']', {14, 2, 2, 2, 2, 2, 14}},      {'=', {0, 0, 31, 0, 31, 0, 0}}};
 Hud::Hud(VulkanContext &context, VkRenderPass pass, VkDescriptorSetLayout set) : vk(context) {
     vertices = vk.buffer(4 * 1024 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true);
     layout = vk.pipelineLayout(set);
@@ -67,12 +66,11 @@ static std::string number(double v, int precision = 2) {
     return s.str();
 }
 void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6> &t, size_t tris,
-                uint32_t width, uint32_t height, float fps, double cubeDrawTime, uint32_t stride,
-                const std::array<double, 8> &stages, bool isolated) {
+                uint32_t width, uint32_t height, float fps, double cubeDrawTime) {
     mesh.clear();
     if (!s.visibleHud)
         return;
-    rect(8, 8, 430, 476, {.01f, .018f, .03f, .90f});
+    rect(8, 8, 430, 400, {.01f, .018f, .03f, .90f});
     text(18, 18, "MICROVOXELS - CONTINUOUS SOURCE / UNLIT CUBES", {.30f, .88f, .70f, 1});
     for (int i = 0; i < 3; i++) {
         rect(18 + 140 * i, 37, 130, 21,
@@ -114,8 +112,8 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
     text(18, 269,
          "FPS " + number(fps, 1) + "  FRAME " + number(1000 / std::max(fps, .01f)) + " MS");
     text(18, 285,
-         "SOURCE " + number(t[0]) + "  GEN " + number(t[1] + t[2] + t[3]) +
-             (isolated ? "  DRAW " : "  RENDER ") + number(isolated ? cubeDrawTime : t[4]) + " MS");
+         "SOURCE " + number(t[0]) + "  GEN " + number(t[1] + t[2] + t[3]) + "  DRAW " +
+             number(cubeDrawTime) + " MS");
     text(18, 301,
          "DROPPED " + std::to_string(c.dropped) + "  CLAMPED " +
              std::to_string(c.clampedFootprints));
@@ -124,26 +122,6 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
     text(18, 355, std::string("C: PROJECTED-SIZE LOD ") + (s.adaptiveLod ? "ON" : "OFF"));
     text(18, 373,
          c.hits ? "WASD QE / RIGHT MOUSE / R RESET / F1 HUD" : "NO SOURCE HITS - R: RESET VIEW");
-    text(18, 395, "GLOBAL HASH ATTEMPTS " + std::to_string(c.globalHashAttempts));
-    text(18, 411,
-         "LOAD " + number(100.0 * c.instanceCount / (1 << 21), 2) + "%  CONTRIBUTORS/CELL " +
-             number(c.instanceCount ? double(c.candidateWrites) / c.instanceCount : 0));
-    text(18, 427,
-         "INSTANCE " + std::to_string(stride) + " B  ACTIVE " +
-             number(double(c.instanceCount) * stride / 1048576, 2) + " MIB");
-    if (isolated) {
-        text(18, 443,
-             "CLEAR " + number(stages[0]) + "  LOD " + number(stages[2] + stages[3]) + " MS");
-        text(18, 459,
-             "HASH " + number(stages[4]) + "  RESOLVE " +
-                 number(stages[5] + stages[6] + stages[7]) + " MS");
-    } else {
-        text(18, 443, "PASS TIMES: --PROFILE-STAGES");
-        double frame = 0;
-        for (double interval : t)
-            frame += interval;
-        text(18, 459, "GPU FRAME " + number(frame) + " MS");
-    }
     if (mesh.size() * sizeof(HudVertex) > vertices.size)
         throw std::runtime_error("HUD buffer too small");
     std::memcpy(vertices.mapped, mesh.data(), mesh.size() * sizeof(HudVertex));

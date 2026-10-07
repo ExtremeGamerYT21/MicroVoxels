@@ -3,7 +3,6 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <string>
@@ -32,23 +31,11 @@ struct Counters {
         candidateWrites;
     uint32_t perLod[8];
     uint32_t maxFootprintCells, clampedFootprints, rejectedNeighbors, maxFootprintExtent;
-    uint32_t globalHashAttempts, hashProbes, localFallbacks, dispatchX, dispatchY, dispatchZ;
 };
-static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 104 && sizeof(Parameters) == 80 &&
-              sizeof(Frame) == 304);
-static_assert(offsetof(Counters, instanceCount) == 4 && offsetof(Counters, dispatchX) == 92);
+static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 80 && sizeof(Parameters) == 64 &&
+              sizeof(Frame) == 176);
 class VulkanContext {
   public:
-    // Serialize markers only for isolated stage profiling. Ordinary timestamps
-    // allow overlap, so their per-stage attribution can be misleading on software Vulkan.
-    void timestamp(VkQueryPool pool, uint32_t query, bool isolated = false,
-                   VkPipelineStageFlagBits stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) {
-        if (!pool)
-            return;
-        vkCmdWriteTimestamp(cmd, stage, pool, query);
-        if (isolated)
-            barrier(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0);
-    }
     GLFWwindow *window{};
     VkInstance instance{};
     VkDebugUtilsMessengerEXT debug{};

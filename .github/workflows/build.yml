@@ -34,24 +34,6 @@ jobs:
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --point-splats --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/point.ppm --report captures/point-fine.json
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/footprint.ppm --report captures/footprint-fine.json
           python3 tests/footprint_comparison.py captures/motion-point captures/motion-footprint captures/motion-point.json captures/motion-footprint.json captures/point.ppm captures/footprint.ppm captures/comparison.json
-      - name: Independent pipeline optimization variants
-        env:
-          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
-        run: |
-          export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --time 1 --width 640 --height 480 --no-ui --legacy-compaction --unpacked --full-clear --screenshot captures/pipeline-legacy.ppm --report captures/pipeline-legacy.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --time 1 --width 640 --height 480 --no-ui --unpacked --full-clear --screenshot captures/pipeline-append.ppm --report captures/pipeline-append.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --time 1 --width 640 --height 480 --no-ui --screenshot captures/pipeline-packed.ppm --report captures/pipeline-packed.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --time 1 --width 640 --height 480 --no-ui --local-dedup --screenshot captures/pipeline-local.ppm --report captures/pipeline-local.json
-          python3 tests/pipeline_comparison.py captures captures/pipeline-comparison.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --time 1 --width 319 --height 239 --no-ui --depth-source --local-dedup --report captures/depth-odd.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --depth-source --report captures/depth-exercise.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --local-dedup --report captures/local-exercise.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --time 1 --width 192 --height 144 --no-ui --levels 1 --voxel-size .0057 --footprint-radius 2 --footprint-limit 64 --local-dedup --report captures/local-fallback.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --width 320 --height 240 --no-ui --profile-stages --report captures/isolated-stages.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --levels 1 --voxel-size .0057 --no-adaptive-lod --no-ui --report captures/dense-controls.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --legacy-compaction --exercise-controls --frames 16 --width 480 --height 360 --levels 1 --voxel-size .0057 --no-adaptive-lod --no-ui --report captures/legacy-dense-controls.json
-          python3 -c 'import json; from pathlib import Path; reports=[json.loads((Path("captures")/name).read_text()) for name in ("dense-controls.json","legacy-dense-controls.json")]; assert all(r["full_clear_frames"] > 1 and r["touched_clear_frames"] > 0 for r in reports); assert json.loads(Path("captures/local-fallback.json").read_text())["local_dedup_fallbacks"] > 0'
       - uses: actions/upload-artifact@v4
         with:
           name: verification-reports

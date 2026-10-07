@@ -2,5 +2,3 @@ build*/
 captures/
 *.ppm
 *.spv
-__pycache__/
-*.pyc

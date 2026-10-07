@@ -25,8 +25,7 @@ class Hud {
     Hud(VulkanContext &vk, VkRenderPass pass, VkDescriptorSetLayout setLayout);
     ~Hud();
     void build(const Settings &s, const Counters &counts, const std::array<double, 6> &times,
-               size_t triangles, uint32_t width, uint32_t height, float fps, double cubeDrawTime,
-               uint32_t instanceStride, const std::array<double, 8> &stages, bool isolatedStages);
+               size_t triangles, uint32_t width, uint32_t height, float fps, double cubeDrawTime);
     void draw();
     void click(double x, double y, Settings &s);
 };
