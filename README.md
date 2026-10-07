@@ -2,7 +2,11 @@
 
 A C++20/Vulkan experiment that turns **rasterized visible world positions and final source RGB** into a sparse shell of **unlit coloured cubes**. The voxel generator reads source buffers only. It has no source triangle topology, material evaluation, or post-process raycasting.
 
-The default source scene is a countryside garden: rolling terrain, grass blades, a tiled-roof cottage, opaque windows, a stone path, trees, a timber fence, a flower bed and a bench. The original 2,860-triangle test scene remains available with `--scene test`. A future SDF, procedural renderer or hardware ray tracer can supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
+The default source scene is a 38,425-triangle countryside garden: rolling terrain, grass blades, a tiled-roof cottage, opaque windows, a stone path, trees, a timber fence, a flower bed and a bench. The original 2,860-triangle test scene remains available with `--scene test`. A future SDF, procedural renderer or hardware ray tracer can supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
+
+![Garden source triangles on the left and unlit microvoxels on the right](docs/countryside.png)
+
+Default-scene preview rendered with software Vulkan for visual verification. Hardware performance must be measured on the device running the demo.
 
 ## Build and run
 
