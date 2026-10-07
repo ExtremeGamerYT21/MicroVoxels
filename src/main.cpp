@@ -208,6 +208,8 @@ struct ReferenceCell {
 using RootHistory = std::map<std::array<int32_t, 3>, int>;
 void verify(const Parameters &p, const Frame &f, const Readback &readback, const Counters &c,
             RootHistory &history) {
+    if (c.vertexCount != 36 || c.firstVertex != 0 || c.firstInstance != 0)
+        throw std::runtime_error("Invalid GPU indirect cube draw command");
     auto *positions = static_cast<const glm::vec4 *>(readback.positions.mapped);
     auto *colors = static_cast<const glm::vec4 *>(readback.colors.mapped);
     auto *lods = static_cast<const uint32_t *>(readback.lods.mapped);
@@ -595,6 +597,9 @@ int main(int argc, char **argv) {
                   << ",\n  \"samples\": " << source.width * source.height
                   << ",\n  \"hits\": " << counts.hits
                   << ",\n  \"unique_voxels\": " << counts.instanceCount
+                  << ",\n  \"indirect_vertex_count\": " << counts.vertexCount
+                  << ",\n  \"indirect_first_vertex\": " << counts.firstVertex
+                  << ",\n  \"indirect_first_instance\": " << counts.firstInstance
                   << ",\n  \"dropped_hits\": " << counts.dropped
                   << ",\n  \"dropped_root_history_samples\": " << counts.rootDropped
                   << ",\n  \"verified_frames\": " << verifiedFrames

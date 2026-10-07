@@ -56,14 +56,18 @@ The normal cube pipeline outputs stored RGB with a flat qualifier. It has no lig
 shader, no cube-face shading, no AO, no shadow pass, and no BRDF. The debug pipeline alone receives cube-face
 normals and deliberately modulates the captured colour by a directional cube light.
 
-Each cube is currently generated procedurally as 36 non-indexed vertices. The GPU-written first 16 bytes of
-the counters buffer are a `VkDrawIndirectCommand`. There is one indirect draw for the entire cloud.
+Each cube is currently generated procedurally as 36 non-indexed vertices. The first 16 bytes of the counters
+buffer are a `VkDrawIndirectCommand`. One transfer initializes the entire counter buffer with 36 vertices
+and zero instances/statistics; compaction atomically increments the instance count. Clearing the buffer and
+then partially updating it would require a transfer-to-transfer dependency, since overlapping transfer writes
+are not implicitly ordered. There is one indirect draw for the entire cloud. `--verify` also checks the
+indirect command's vertex count and starting offsets, and profile reports expose those fields.
 
 The prototype uses one graphics/compute/present queue and one frame in flight. Render-pass dependencies make
 source colour/position writes visible to sampling; explicit barriers order clears, LOD image writes, colour
 reduction, compaction, vertex reads, indirect-command reads, and transfer/host readbacks. Presentation uses
 a semaphore per swapchain image; its reuse follows reacquisition of that image. Validation is optional and
-fails the run if an error is reported.
+fails the run if an error is reported. CI additionally enables synchronization validation for its GPU checks.
 
 Freeze skips all three generation dispatches and preserves instance/counter buffers. Source animation,
 source shading and the camera continue. Resize recreates source images/history and presentation targets,

@@ -20,6 +20,8 @@ jobs:
       - name: Grid tests
         run: ctest --test-dir build --output-on-failure
       - name: GPU reference and freeze checks on software Vulkan
+        env:
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
         run: |
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/ci.json

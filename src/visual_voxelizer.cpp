@@ -93,14 +93,16 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                VK_ACCESS_TRANSFER_WRITE_BIT);
     vkCmdFillBuffer(vk.cmd, slots.handle, 0, slots.size, 0);
-    vkCmdFillBuffer(vk.cmd, counters.handle, 0, counters.size, 0);
+    // Initialize the whole indirect command and statistics in one transfer. A fill
+    // followed by an unsynchronized partial update can clear vertexCount again.
+    Counters initial{};
+    initial.vertexCount = 36;
+    vkCmdUpdateBuffer(vk.cmd, counters.handle, 0, sizeof(initial), &initial);
     vkCmdFillBuffer(vk.cmd, roots[current].handle, 0, roots[current].size, 0);
     if (resetHistory) {
         vkCmdFillBuffer(vk.cmd, roots[1 - current].handle, 0, roots[1 - current].size, 0);
         resetHistory = false;
     }
-    uint32_t vertices = 36;
-    vkCmdUpdateBuffer(vk.cmd, counters.handle, 0, 4, &vertices);
     vk.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_TRANSFER_WRITE_BIT,
                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
