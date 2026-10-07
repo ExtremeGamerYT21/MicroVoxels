@@ -54,6 +54,7 @@ class VulkanContext {
     VkSemaphore acquired{};
     std::vector<VkSemaphore> presented;
     VkSwapchainKHR swapchain{};
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
     VkFormat swapFormat{};
     VkExtent2D extent{};
     std::vector<VkImage> swapImages;
@@ -61,7 +62,8 @@ class VulkanContext {
     VkDescriptorPool descriptorPool{};
     VkSampler sampler{};
     bool validation{};
-    VulkanContext(int width, int height, bool hidden, bool validate);
+    bool vsyncRequested = true;
+    VulkanContext(int width, int height, bool hidden, bool validate, bool vsync = true);
     ~VulkanContext();
     Buffer buffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host = false);
     Image image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage,
@@ -77,6 +79,7 @@ class VulkanContext {
     VkPipelineLayout pipelineLayout(VkDescriptorSetLayout set);
     VkDescriptorSet allocate(VkDescriptorSetLayout layout);
     void resizeSwapchain();
+    const char *presentModeName() const;
     void begin();
     void submit(uint32_t index);
     void wait();

@@ -58,6 +58,13 @@ GPU timestamps without validation, screenshots, cloud readbacks or extra shader
 counters. Run order rotates, and the summary reports medians of the run averages.
 It also checks matching counts and rejects empty or overflowing clouds.
 
+The benchmark requests `--no-vsync` to avoid the normal FIFO presentation cap.
+The demo prefers immediate presentation, then mailbox, with FIFO as the supported
+fallback. Reports retain the actual present mode; the script flags a FIFO fallback.
+Normal launches keep VSync enabled. For manual FPS comparisons, add `--no-vsync`
+to the launch command. Immediate mode can tear; driver or desktop settings can
+still impose a frame limit.
+
 `RenderMs` includes indexed-command preparation as well as the draw and render
 pass setup. `CubeMs` isolates the draw. `FrameMs` is timed GPU pipeline work; it
 excludes presentation and CPU overhead and should not be treated as application

@@ -32,6 +32,18 @@ cmake --build build-windows --config Release
 
 Run commands from the project directory containing `CMakeLists.txt`. Shader compilation is automatic. An existing configured build only needs `cmake --build build-windows --config Release` after updating the source. CI builds with Windows MSVC and verifies rendering with software Vulkan on Linux.
 
+VSync is enabled by default, so application FPS can be capped at the screen's
+refresh rate. To measure uncapped performance:
+
+```bat
+.\build-windows\Release\microvoxels.exe --no-vsync
+```
+
+This requests immediate presentation, then mailbox if immediate is unavailable,
+and falls back to FIFO if neither is supported. Immediate presentation can tear.
+Startup output and JSON reports show the actual present mode. `--vsync` restores
+the default. Driver or desktop settings can still impose a cap.
+
 Select a source scene; both use the same restored voxel pipeline and settings:
 
 ```bat
@@ -108,7 +120,7 @@ ctest --test-dir build --output-on-failure
 ./build/microvoxels --scene garden --validation --verify --exercise --frames 8 --width 480 --height 360
 ./build/microvoxels --scene test --validation --verify --exercise-controls --frames 16 --width 480 --height 360
 ./build/microvoxels --scene test --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
-./build/microvoxels --frames 120 --time 1 --no-ui --report profile.json
+./build/microvoxels --frames 120 --time 1 --no-ui --no-vsync --report profile.json
 ```
 
 `--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.

@@ -18,7 +18,8 @@ debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessa
     std::cerr << "Vulkan validation: " << data->pMessage << '\n';
     return VK_FALSE;
 }
-VulkanContext::VulkanContext(int w, int h, bool hidden, bool validate) : validation(validate) {
+VulkanContext::VulkanContext(int w, int h, bool hidden, bool validate, bool vsync)
+    : validation(validate), vsyncRequested(vsync) {
     glfwSetErrorCallback([](int code, const char *message) {
         std::cerr << "GLFW " << code << ": " << message << '\n';
     });
@@ -397,6 +398,16 @@ VkPipeline VulkanContext::graphics(VkPipelineLayout layout, VkRenderPass pass,
     check(r, "create graphics pipeline");
     return p;
 }
+const char *VulkanContext::presentModeName() const {
+    switch (presentMode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        return "immediate";
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        return "mailbox";
+    default:
+        return "fifo";
+    }
+}
 void VulkanContext::resizeSwapchain() {
     check(vkDeviceWaitIdle(device), "wait before resize");
     for (auto s : presented)
@@ -423,6 +434,21 @@ void VulkanContext::resizeSwapchain() {
     swapFormat = fmt.format;
     if (swapFormat != VK_FORMAT_B8G8R8A8_SRGB && swapFormat != VK_FORMAT_R8G8B8A8_SRGB)
         throw std::runtime_error("An sRGB swapchain is required to preserve linear source colors");
+    // FIFO is always supported. Preserve the requested mode across window resizes.
+    presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    if (!vsyncRequested) {
+        check(vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, nullptr),
+              "count surface present modes");
+        std::vector<VkPresentModeKHR> modes(n);
+        check(vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, modes.data()),
+              "surface present modes");
+        for (auto preferred : {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR}) {
+            if (std::find(modes.begin(), modes.end(), preferred) != modes.end()) {
+                presentMode = preferred;
+                break;
+            }
+        }
+    }
     int w, h;
     glfwGetFramebufferSize(window, &w, &h);
     extent =
@@ -444,9 +470,13 @@ void VulkanContext::resizeSwapchain() {
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    ci.presentMode = presentMode;
     ci.clipped = VK_TRUE;
     check(vkCreateSwapchainKHR(device, &ci, nullptr, &swapchain), "create swapchain");
+    std::cout << "Presentation: " << presentModeName()
+              << " (VSync requested: " << (vsyncRequested ? "on" : "off") << ")\n";
+    if (!vsyncRequested && presentMode == VK_PRESENT_MODE_FIFO_KHR)
+        std::cout << "Uncapped presentation unavailable; using refresh-synchronized FIFO.\n";
     vkGetSwapchainImagesKHR(device, swapchain, &n, nullptr);
     swapImages.resize(n);
     vkGetSwapchainImagesKHR(device, swapchain, &n, swapImages.data());

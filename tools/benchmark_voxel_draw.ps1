@@ -30,7 +30,7 @@ for ($round = 0; $round -lt $Repeats; ++$round) {
         $config = $configs[($j + $round) % $configs.Count]
         $reportPath = Join-Path $Output "$($config.Name)-$round.json"
         $demoArgs = @('--scene', $Scene, '--width', "$Width", '--height', "$Height",
-            '--frames', "$Frames", '--time', '1', '--mode', '1', '--hidden', '--no-ui',
+            '--frames', "$Frames", '--time', '1', '--mode', '1', '--hidden', '--no-ui', '--no-vsync',
             '--voxel-size', $VoxelSize.ToString([Globalization.CultureInfo]::InvariantCulture),
             '--levels', "$Levels", '--cube-mesh', $config.Mesh, '--cube-culling', $config.Cull,
             '--report', $reportPath)
@@ -52,6 +52,7 @@ for ($round = 0; $round -lt $Repeats; ++$round) {
         if ($signature -ne $reference) { throw 'Voxel counts changed between draw paths.' }
         $runs += [pscustomobject]@{
             Config=$config.Name; Round=$round; Device=$report.device; DeviceType=$report.device_type
+            PresentMode=$report.present_mode
             CubeMs=[double]$report.final_voxel_draw_ms
             RenderMs=[double]$report.average_gpu_timings.final_render_ms
             FrameMs=[double]$report.gpu_frame_ms; Voxels=$report.unique_voxels
@@ -82,11 +83,15 @@ $summary | Format-Table -AutoSize
 $software = $runs[0].DeviceType -eq 'cpu'
 [pscustomobject]@{
     Device=$runs[0].Device; SoftwareVulkan=$software; TimingScope=$(if ($Live) {'live'} else {'frozen'})
+    VSyncRequested=$false; PresentModes=@($runs.PresentMode | Select-Object -Unique)
     SourceScene=$Scene; Width=$Width; Height=$Height; Frames=$Frames; Repeats=$Repeats
     VoxelSize=$VoxelSize; Levels=$Levels; PointSplats=[bool]$PointSplats
     AdaptiveLod=![bool]$NoAdaptiveLod; Summary=$summary; Runs=$runs
 } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $Output 'benchmark-summary.json')
 Write-Host "Device: $($runs[0].Device). Reports: $Output"
+if (@($runs | Where-Object PresentMode -eq 'fifo').Count) {
+    Write-Host 'Uncapped presentation unavailable: FIFO may limit application FPS to screen refresh.'
+}
 if ($software) {
     Write-Host 'Software Vulkan: these results do not establish hardware GPU performance.'
 } else {

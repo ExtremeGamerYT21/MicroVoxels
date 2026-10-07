@@ -20,6 +20,7 @@ struct Options {
     int width = 1100, height = 720, frames = 0;
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
          exerciseControls = false, exerciseStability = false, exerciseRender = false;
+    bool vsync = true;
     int freezeAfter = -1;
     float fixedTime = -1;
     SourceScene scene = SourceScene::Garden;
@@ -51,6 +52,10 @@ Options parse(int argc, char **argv) {
             o.frames = std::stoi(value());
         else if (a == "--hidden")
             o.hidden = true;
+        else if (a == "--no-vsync")
+            o.vsync = false;
+        else if (a == "--vsync")
+            o.vsync = true;
         else if (a == "--verify")
             o.verify = true;
         else if (a == "--validation")
@@ -119,6 +124,7 @@ Options parse(int argc, char **argv) {
                 << "--voxel-size METERS --lod-distance METERS --levels 1..6 --mode 0|1|2\n"
                 << "--lighting 0|1|2 --debug-cubes --closest --supersampling --time SECONDS\n"
                 << "--no-ui --screenshot FILE.ppm --report FILE.json\n"
+                << "--no-vsync (uncapped presentation) --vsync (default)\n"
                 << "--point-splats --footprint-splats --footprint-radius 0..2 --footprint-limit "
                    "1..64\n"
                 << "--capture-sequence DIRECTORY --no-adaptive-lod --exercise-controls (16 frames) "
@@ -620,7 +626,7 @@ struct QueryCleanup {
 int main(int argc, char **argv) {
     try {
         Options opt = parse(argc, argv);
-        VulkanContext vk(opt.width, opt.height, opt.hidden, opt.validation);
+        VulkanContext vk(opt.width, opt.height, opt.hidden, opt.validation, opt.vsync);
         Buffer frameBuffer = vk.buffer(sizeof(Frame), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
         BufferCleanup frameCleanup{vk, frameBuffer};
         {
@@ -1064,6 +1070,8 @@ int main(int argc, char **argv) {
                   << "\",\n  \"source_backend\": \"Vulkan raster G-buffer\",\n  \"frames\": "
                   << frameNumber << ",\n  \"timed_frames_after_warmup\": " << timedFrames
                   << ",\n  \"scene\": \"" << (opt.scene == SourceScene::Garden ? "garden" : "test") << "\""
+                  << ",\n  \"vsync_requested\": " << (vk.vsyncRequested ? "true" : "false")
+                  << ",\n  \"present_mode\": \"" << vk.presentModeName() << "\""
                   << ",\n  \"device_type\": \""
                   << (vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "cpu"
                       : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete"

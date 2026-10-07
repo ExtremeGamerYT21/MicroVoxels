@@ -65,8 +65,19 @@ jobs:
               python3 tests/cube_render_comparison.py captures/render-${scene}-legacy-off captures/render-${scene}-${config} captures/render-${scene}-${config}-comparison.json "${exact[@]}"
             done
           done
-          xvfb-run -a ./build/microvoxels --scene test --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --report captures/indexed-controls.json
+          xvfb-run -a ./build/microvoxels --scene test --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --no-vsync --report captures/indexed-controls.json
           xvfb-run -a ./build/microvoxels --scene garden --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/indexed-exercise.json
+          python3 - <<'PY'
+          import json
+          with open('captures/indexed-controls.json') as f:
+              uncapped = json.load(f)
+          with open('captures/indexed-exercise.json') as f:
+              default = json.load(f)
+          assert uncapped['vsync_requested'] is False
+          assert uncapped['present_mode'] in ('immediate', 'mailbox', 'fifo')
+          assert uncapped['control_checks'] == 16
+          assert default['vsync_requested'] is True and default['present_mode'] == 'fifo'
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
