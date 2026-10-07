@@ -1,12 +1,13 @@
 #pragma once
 #include <array>
+#include <utility>
 #include <vector>
 namespace micro {
 using Point3 = std::array<double, 3>;
-// Independent CPU reference: clip the triangle polygon against all six box planes.
+// Independent CPU reference: clip the pixel footprint polygon against all six box planes.
 // Inputs use cell-relative coordinates, matching a geometric unit cell.
-inline bool clippedTriangleBox(std::array<Point3, 3> triangle, double half = .5001) {
-    std::vector<Point3> polygon(triangle.begin(), triangle.end());
+inline bool clippedFootprintBox(std::array<Point3, 4> footprint, double half = .5001) {
+    std::vector<Point3> polygon(footprint.begin(), footprint.end());
     for (int axis = 0; axis < 3; axis++)
         for (int sign : {-1, 1}) {
             if (polygon.empty())

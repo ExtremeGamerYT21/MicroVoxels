@@ -27,13 +27,13 @@ jobs:
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/ci.json
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --supersampling --frames 3 --width 320 --height 240 --no-ui --report captures/supersampling.json
           xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --report captures/controls.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --exercise-stability --frames 6 --width 480 --height 360 --no-ui --report captures/stability.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --sample-occupancy --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/sample-exercise.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 1 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --lighting 0 --time 1 --report captures/triangle-fine.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --sample-occupancy --no-adaptive-lod --frames 3 --width 480 --height 360 --no-ui --report captures/distance-lod.json
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --sample-occupancy --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/gaps-before.ppm
-          xvfb-run -a ./build/microvoxels --hidden --validation --verify --sample-occupancy --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/gaps-after.ppm
-          python3 tests/render_coverage.py captures/gaps-before.ppm captures/gaps-after.ppm captures/coverage.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --point-splats --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/point-exercise.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --exercise-stability --frames 12 --width 640 --height 480 --no-ui --point-splats --capture-sequence captures/motion-point --report captures/motion-point.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --exercise-stability --frames 12 --width 640 --height 480 --no-ui --capture-sequence captures/motion-footprint --report captures/motion-footprint.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --frames 3 --width 320 --height 240 --no-ui --levels 1 --voxel-size .0057 --footprint-radius 2 --footprint-limit 4 --time 1 --report captures/limits.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --point-splats --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/point.ppm --report captures/point-fine.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/footprint.ppm --report captures/footprint-fine.json
+          python3 tests/footprint_comparison.py captures/motion-point captures/motion-footprint captures/motion-point.json captures/motion-footprint.json captures/point.ppm captures/footprint.ppm captures/comparison.json
       - uses: actions/upload-artifact@v4
         with:
           name: verification-reports

@@ -1,65 +1,50 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
+#include "counters.glsl"
 #include "lattice.glsl"
-#include "triangle_cells.glsl"
+#include "surface_footprint.glsl"
 layout(local_size_x = 256) in;
-layout(set = 0, binding = 1) uniform sampler2D positions;
 layout(set = 0, binding = 7) uniform sampler2D colors;
 layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
 struct Slot {
-    uint owner;
-    uint r;
-    uint g;
-    uint b;
-    uint count;
-    uint nearest;
+    uint owner, r, g, b, count, nearest;
 };
 layout(set = 0, binding = 8, std430) readonly buffer Hash {
     Slot slots[];
 };
-layout(set = 0, binding = 9, std430) buffer Counters {
-    uint vertexCount;
-    uint instanceCount;
-    uint firstVertex;
-    uint firstInstance;
-    uint hits;
-    uint dropped;
-    uint rootDropped;
-    uint pad;
-    uint perLod[8];
-};
 struct Voxel {
-    vec4 centerSize;
-    vec4 rgba;
+    vec4 centerSize, rgba;
 };
 layout(set = 0, binding = 10, std430) writeonly buffer Instances {
     Voxel voxels[];
 };
+layout(set = 0, binding = 11, std430) readonly buffer Groups {
+    uint offsets[];
+};
+shared uint scan[256];
 void main() {
-    uint s = gl_GlobalInvocationID.x;
-    if (s >= uint(params.extent.z) || slots[s].owner == 0)
-        return;
-    bool triangles = frame.options.z != 0;
-    ivec4 key;
-    if (triangles)
-        key = candidates[slots[s].owner - 1u].key;
-    else {
-        ivec2 p = pixel(slots[s].owner - 1);
-        key = voxelKey(texelFetch(positions, p, 0).xyz, imageLoad(lods, p).r);
+    uint s = gl_GlobalInvocationID.x, local = gl_LocalInvocationID.x;
+    bool valid = s < uint(params.extent.z) && slots[s].owner != 0u;
+    scan[local] = valid ? 1u : 0u;
+    barrier();
+    for (uint stride = 1u; stride < 256u; stride <<= 1u) {
+        uint previous = local >= stride ? scan[local - stride] : 0u;
+        barrier();
+        scan[local] += previous;
+        barrier();
     }
-    uint lod = uint(key.w);
+    if (!valid)
+        return;
+    ivec2 p = ownerPixel(slots[s].owner);
+    ivec4 key = voxelKey(texelFetch(positions, p, 0).xyz, imageLoad(lods, p).r);
+    key.xyz += ownerOffset(slots[s].owner);
+    uint lod = uint(key.w), idx = offsets[gl_WorkGroupID.x] + scan[local] - 1u;
     float h = params.config.x * exp2(float(lod));
-    uint idx = atomicAdd(instanceCount, 1); // max instances == hash capacity: cannot overflow
-    vec3 rgb;
-    if (params.flags.y == 1)
-        rgb = vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count));
-    else if (triangles) {
-        vec3 point;
-        candidateSurface(slots[s].nearest, point, rgb);
-    } else
-        rgb = texelFetch(colors, pixel(slots[s].nearest - 1), 0).rgb;
+    vec3 rgb = params.flags.y == 1
+                   ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
+                   : texelFetch(colors, ownerPixel(slots[s].nearest), 0).rgb;
     voxels[idx].centerSize = vec4((vec3(key.xyz) + .5) * h, h * params.config.w);
     voxels[idx].rgba = vec4(rgb, 1);
-    atomicAdd(perLod[lod], 1);
+    atomicAdd(perLod[lod], 1u);
 }

@@ -1,20 +1,12 @@
 # Microvoxels
 
-A small C++20/Vulkan rendering experiment: the source visibility pass identifies ordinary triangles,
-then **triangle–cell overlap** generates a sparse shell of **unlit coloured cubes**. Colours are evaluated
-on the original source surfaces. The earlier pixel-sampled path remains available for comparison.
+A C++20/Vulkan experiment that turns **rasterized visible world positions and final source RGB** into a sparse shell of **unlit coloured cubes**. The voxel generator reads source buffers only. It has no source triangle topology, material evaluation, or post-process raycasting.
 
-The world is triangles. There is no voxel terrain, stored object volume, or persistent voxel world.
-The default cube fragment shader is literally `outColor = color;`. Cube lighting has a separate,
-explicitly selected debug pipeline.
-
-![Source triangles, left; unlit microvoxels, right](docs/comparison.png)
+The demo source happens to be 2,860 triangles. A future SDF, procedural renderer or hardware ray tracer can supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
 
 ## Build and run
 
-Requires CMake 3.24+, a C++20 compiler, Vulkan headers/loader, `glslangValidator`, GLFW 3.3+, and GLM.
-No ray-tracing hardware or vendor-specific extensions are required. Vulkan 1.1 graphics + compute,
-an sRGB desktop swapchain, and the image formats checked at startup are used.
+Requires CMake 3.24+, a C++20 compiler, Vulkan headers/loader, `glslangValidator`, GLFW 3.3+ and GLM. The demo uses Vulkan 1.1 graphics and compute. No ray-tracing extensions are required.
 
 Ubuntu / Debian:
 
@@ -25,120 +17,82 @@ cmake --build build
 ./build/microvoxels
 ```
 
-Install a current AMD Vulkan driver on your own machine. On Linux this is commonly Mesa RADV;
-on Windows use the AMD driver and the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home).
+Windows, Visual Studio + vcpkg + Vulkan SDK:
 
-Windows, Visual Studio 2022 + vcpkg + Vulkan SDK:
-
-```powershell
-vcpkg install glfw3:x64-windows glm:x64-windows
-cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-cmake --build build --config Release
-.\build\Release\microvoxels.exe
+```bat
+C:\Users\Extreme\vcpkg\vcpkg.exe install glfw3:x64-windows glm:x64-windows
+cmake -S . -B build-windows -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/Users/Extreme/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build-windows --config Release
+.\build-windows\Release\microvoxels.exe
 ```
 
-CI compiles the Windows version with MSVC and checks Vulkan rendering on Linux with a software driver.
-Shaders are compiled automatically and loaded from the build's shader directory. Build locally before running.
+Run commands from the project directory containing `CMakeLists.txt`. Shader compilation is automatic. An existing configured build only needs `cmake --build build-windows --config Release` after updating the source. CI builds with Windows MSVC and verifies rendering with software Vulkan on Linux.
 
-## Try the experiment
+## Compare point and footprint splats
 
-Start in side-by-side mode. The orange sphere uses interpolated smooth normals and a glossy source highlight.
-The blue crystal uses flat source normals. The tree and its curved leaves bend continuously in the shared
-source animation pass. Watch the leaves while changing voxel size: their occupied world cells pop in and out.
+The default **footprint mode** estimates a small parallelogram from the centre pixel and its four immediate axis neighbors, all within a 3×3 neighborhood. It rejects discontinuous neighbors, clamps the patch, and emits cells overlapped by it. Every contribution uses the centre sample's already-shaded RGB. The original point cell is always retained.
 
-Click the HUD's buttons and sliders, or use these keys:
+Press **T** to compare this with **point mode**, where one valid source sample emits one cell. Both use the same source visibility, world grid, RGB reduction and unlit cube renderer. Default bounds are a **one-cell radius** and **27 candidate writes per valid source sample**. The bounds can be configured independently:
+
+```bat
+.\build-windows\Release\microvoxels.exe --point-splats
+.\build-windows\Release\microvoxels.exe --footprint-radius 2 --footprint-limit 27
+.\build-windows\Release\microvoxels.exe --levels 1 --no-adaptive-lod
+```
+
+`--footprint-radius 0` produces point-sized footprints. `--sample-occupancy` remains an alias for point mode. Normal cubes use exact cell-sized geometry. Shared corners come from integer grid boundaries. Ordered GPU compaction also fixes the observed stationary draw-order flicker at equal-depth faces.
 
 | Control | Action |
 |---|---|
-| WASD / Q / E | Fly forward/backward/sideways/down/up |
+| WASD / Q / E | Fly |
 | Hold right mouse | Look around |
-| R | Reset the camera to the starting view and unfreeze/resample the cloud |
-| T | Toggle geometric triangle occupancy / pixel-sampled occupancy |
-| C | In the pixel-sampled path, toggle LOD based on source sample spacing |
+| R | Reset the camera and unfreeze |
+| T | Point / conservative footprint splats |
+| C | Toggle projected-source-footprint LOD |
 | Shift | Faster camera |
-| Tab | Source → microvoxels → side by side |
-| F | Freeze/unfreeze the generated cloud; camera and source animation continue |
-| G | Compare with separately lit cube faces |
-| + / - | Increase/decrease the base voxel size |
-| [ / ] | Decrease/increase the first LOD distance |
+| Tab | Source / microvoxels / side by side |
+| F | Freeze the cloud; camera and source continue |
+| G | Separate cube-face-lighting debug pipeline |
+| + / - | Base voxel size |
+| [ / ] | First distance LOD boundary |
 | 1–6 | Number of nested LOD levels |
-| O | Average RGB / closest source sample |
-| X | Toggle 2×2 source sampling; each image dimension is capped at 2048 |
-| H | Albedo only / smooth lighting / smooth lighting with source shadow map |
+| O | Average RGB / closest source point |
+| X | Toggle 2×2 source sampling |
+| H | Albedo / source lighting / source shadows |
 | P | Pause source animation |
-| F1 | Hide/show the HUD |
+| F1 | Hide/show HUD |
 | Escape | Exit |
 
-Freeze, then walk around a sphere or plant. Triangles never selected by source visibility are missing by design. The frozen colours
-also retain their original view-dependent source shading, including the captured glossy highlight.
-Use the left pane to see the current continuous scene while the right pane displays that frozen shell.
+Defaults: 10 mm base pitch, 4 m first distance boundary, five levels, ±10% LOD hysteresis, footprint splats and projected-size LOD enabled. Grid origin stays at world `(0,0,0)`.
 
-Defaults: base size 10 mm; first LOD boundary 4 m; five levels; ±10% hysteresis; 1.03× cube size.
-The default triangle path uses the depth-tested source triangle IDs only to select triangles. It then tests
-those triangles against geometric world-grid cells, independently of source pixel sample placement. A
-conservative region-frustum test skips work entirely outside the view. Static triangle occupancy is stable
-while it remains selected at the same LOD; true visibility, animation and LOD changes still update the shell.
+The HUD shows source resolution/samples, valid hits, candidate writes, unique cubes, writes per hit, maximum footprint extent/count, clamped/rejected footprints, frame time, generation time and cube draw time.
 
-Colour is evaluated at the closest point on each intersecting source triangle to the cell centre, using the
-same interpolated normals, albedo, gloss and shadow function as the source view. Average mode weights triangle
-contributions equally; closest mode picks the nearest source point to the camera. Final cubes remain unlit.
-
-Press `T` or pass `--sample-occupancy` for the earlier pixel-sampled provider. In that path, adaptive LOD is
-enabled by default: it raises a region's level when samples are too far apart for smaller cells. `C` toggles
-that behaviour. Additional source samples (`X`) can reveal tiny triangles in both paths, but geometric
-occupancy itself no longer needs denser pixel samples to cover an already-selected triangle.
-The grid origin stays at world `(0,0,0)` through camera movement. The slight cube enlargement helps coverage;
-set `Settings::splat` to `1.0` for exact cell-sized cubes. Geometric coverage can generate substantially more
-cells than pixel sampling; the HUD reports capacity drops. Coarser base cells or earlier distance LOD reduce
-that work.
-
-If both panes are empty and the HUD reports `HITS 0`, press `R` to restore the starting view. Mouse look
-rebases on capture, stops on focus loss, and ignores cursor warps; profile reports include the camera pose
-to help distinguish lost source visibility from a voxel draw failure.
+Freeze and move around to inspect the sampled shell. Newly exposed surfaces are absent until regeneration. Stored RGB retains its original view-dependent source shading. If both panes are empty with `HITS 0`, press **R**. Mouse capture/focus and finite camera-pose guards remain in place.
 
 ## Pipeline
 
-1. **SourceWorld** makes 2,860 ordinary triangles: ground, sphere, crystal, rocks, trunk, branches, leaves.
-2. **SourceRenderer** animates a shared GPU vertex buffer once, then draws a shadow map and depth-tested
-   G-buffer of triangle IDs, world positions and already-shaded linear RGB.
-3. **VisualVoxelizer** marks visible triangle IDs, selects hysteretic LOD for world regions, enumerates
-   intersecting triangle–AABB cells, shades source surface points, deduplicates exact keys and compacts the
-   occupied cells into GPU instances and a GPU-written indirect draw command.
-4. **VoxelRenderer** depth-tests those instances and writes their stored colours. All faces of one normal
-   voxel have identical RGB. Source comparison, debug cube lighting, and HUD are separate draw pipelines.
+1. **SourceRenderer** renders opaque visibility, depth, cached world XYZ and final shaded RGB.
+2. **SurfaceSamples** exposes only visible world positions and final RGB, with one previous position image for LOD history.
+3. **VisualVoxelizer** selects world-region LOD, estimates bounded screen-derived footprints, quantizes cells and reduces RGB using exact keys.
+4. GPU count/prefix/compact passes emit instances in hash-slot order and write the indirect draw count.
+5. **VoxelRenderer** draws centre/size + RGBA instances with stored RGB directly.
 
-`TriangleSurfaces` is the triangle-specific source contract. The alternative `SurfaceSamples` contract
-retains the pixel position/RGB provider, so a future triangle ray-query renderer, SDF, or parametric source
-can supply samples without a triangle-overlap stage. Hardware ray queries and acceleration structures are
-not implemented in this version.
+The existing XYZ buffer is reused rather than adding depth reconstruction to normal generation. Verification independently reconstructs positions from actual Vulkan depth and inverse VP. All lighting, normals, shadows, materials and tone mapping remain in the source stage. There are no ray–box tests, second source visibility pass, triangle–cell voxelization or persistent voxel volume.
 
-Read [the implementation notes](docs/IMPLEMENTATION.md) for exact key handling, LOD history, synchronization,
-capacity limits, and known artefacts. Read [the measured profile](docs/PROFILING.md) for results and next steps.
-
-## Verification and profiling
+## Verification and measurements
 
 ```sh
 ctest --test-dir build --output-on-failure
 ./build/microvoxels --validation --verify --exercise --frames 8 --width 480 --height 360
 ./build/microvoxels --validation --verify --exercise-controls --frames 16 --width 480 --height 360
-./build/microvoxels --validation --exercise-stability --frames 6 --width 480 --height 360
-./build/microvoxels --frames 120 --width 1100 --height 720 --no-ui --report profile.json
-./build/microvoxels --frames 1 --time 1.2 --screenshot comparison.ppm
+./build/microvoxels --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
+./build/microvoxels --frames 120 --time 1 --no-ui --report profile.json
 ```
 
-`--validation` requires `VK_LAYER_KHRONOS_validation`. `--verify` performs expensive readbacks and CPU
-reference checks, including independent polygon clipping for triangle occupancy and source-surface RGB; leave it off when measuring interactive performance. `--exercise` freezes the cloud,
-moves the camera, checks byte-identical instances/counters, unfreezes, and exercises closest RGB and debug
-cube lighting. `--exercise-controls` checks mouse capture/focus, looking away, freezing an empty cloud,
-camera reset, setting changes, sample-target recreation, and window resize. `--exercise-stability` regenerates
-the cloud while changing camera position/orientation, source sampling density and window size, then checks
-that a static floor patch retains identical cell keys and albedo colours. `--hidden` hides a GLFW window;
-it still needs a display. In CI, use `xvfb-run -a`.
+`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.
 
-JSON reports contain source triangle count, sampling resolution, visible hits, unique voxels, per-LOD counts,
-dropped samples, validation errors, and per-stage Vulkan timestamp durations after two warm-up frames.
-Timings are unavailable if the queue has no timestamp support. HUD statistics describe the previous completed
-frame; while frozen, hit/voxel counters describe the last cloud generation.
+`--exercise` checks byte-identical frozen buffers across camera motion, then average/closest RGB and cube-light debug. `--exercise-controls` checks camera loss/reset, mouse capture/focus, empty freeze recovery, settings, mode switches and resize. `--exercise-stability` uses three stationary frames followed by nine small camera movements, with fixed source time, albedo lighting and one LOD. It verifies identical stationary cell/RGB sets and records turnover in a static floor patch. `tests/footprint_comparison.py` checks exact stationary RGB screenshots and measures matched motion silhouettes/coverage.
 
-This version is opaque only. Reflections, transparent source layers, hardware ray tracing, temporal colour
-accumulation, and more sophisticated hole filling are intentionally left for later experiments.
+Source sampling is capped at 2048 pixels per dimension. Tables are bounded; the HUD reports drops. Very fine cells, grazing angles, silhouettes, discontinuity fallback and footprint caps can still leave gaps or changing cells. Projected-size LOD is useful when source pixels cover many smaller cells.
+
+Read [the implementation notes](docs/IMPLEMENTATION.md) and [the measured comparison](docs/FOOTPRINTS.md). Opaque geometry only; transparency and temporal occupancy accumulation are not implemented.

@@ -15,11 +15,10 @@ class SourceRenderer {
     VkFramebuffer shadowFramebuffer{};
     std::array<VkFramebuffer, 2> framebuffers{};
     Buffer originalVertices;
-    glm::vec3 lower{}, upper{};
     void destroyTargets();
 
   public:
-    Image color, depth, shadow, triangleIds;
+    Image color, depth, shadow;
     Buffer animatedVertices;
     std::array<Image, 2> positions;
     uint32_t width{}, height{}, vertexCount{};
@@ -29,9 +28,6 @@ class SourceRenderer {
     void render(int target, const Parameters &parameters);
     SurfaceSamples samples() {
         return {color, positions, width, height};
-    }
-    TriangleSurfaces triangles() {
-        return {triangleIds, shadow, animatedVertices, vertexCount / 3, lower, upper};
     }
 };
 } // namespace micro

@@ -4,15 +4,12 @@ namespace micro {
 class VisualVoxelizer {
     VulkanContext &vk;
     Buffer &frame;
-    VkPipeline lodPipeline{}, resolveLodPipeline{}, hashPipeline{}, compactPipeline{};
-    VkPipeline visibilityPipeline{}, triangleLodPipeline{}, triangleEmitPipeline{},
-        triangleHashPipeline{};
-    uint32_t triangleCount{};
+    VkPipeline lodPipeline{}, resolveLodPipeline{}, hashPipeline{}, compactPipeline{},
+        compactCountsPipeline{}, compactPrefixPipeline{};
 
   public:
-    static constexpr uint32_t Capacity = 1 << 22, CandidateCapacity = 1 << 22,
-                              RootCapacity = 1 << 18;
-    Buffer slots, counters, instances, visibleTriangles, candidates;
+    static constexpr uint32_t Capacity = 1 << 21, RootCapacity = 1 << 18;
+    Buffer slots, counters, instances, compactGroups;
     std::array<Buffer, 2> roots;
     std::array<Image, 2> lods;
     VkDescriptorSetLayout setLayout{};
@@ -20,10 +17,10 @@ class VisualVoxelizer {
     std::array<VkDescriptorSet, 2> sets{};
     bool resetHistory = true, cloudReady = false;
     int current = 0;
-    VisualVoxelizer(VulkanContext &vk, Buffer &frame, const TriangleSurfaces &triangles);
+    VisualVoxelizer(VulkanContext &vk, Buffer &frame);
     ~VisualVoxelizer();
-    void resize(const SurfaceSamples &source, const TriangleSurfaces &triangles);
-    void generate(const Parameters &p, VkQueryPool queries, bool triangles);
+    void resize(const SurfaceSamples &source);
+    void generate(const Parameters &p, VkQueryPool queries);
     void advance() {
         current = 1 - current;
     }

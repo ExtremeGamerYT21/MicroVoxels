@@ -1,4 +1,5 @@
 #pragma once
+#include "surface_types.hpp"
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <array>
@@ -22,25 +23,16 @@ struct Image {
     uint32_t width{}, height{};
     VkImageAspectFlags aspect{};
 };
-struct alignas(16) Frame {
-    glm::mat4 vp, lightVP;
-    glm::vec4 cameraTime, light, options;
-};
-struct alignas(16) Parameters {
-    glm::ivec4 extent;
-    glm::vec4 config;
-    glm::ivec4 flags;
-    glm::ivec4 gridMin, gridExtent;
-};
 struct Voxel {
     glm::vec4 centerSize, rgba;
 };
 struct Counters {
     uint32_t vertexCount, instanceCount, firstVertex, firstInstance, hits, dropped, rootDropped,
-        pad;
+        candidateWrites;
     uint32_t perLod[8];
+    uint32_t maxFootprintCells, clampedFootprints, rejectedNeighbors, maxFootprintExtent;
 };
-static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 64 && sizeof(Parameters) == 80 &&
+static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 80 && sizeof(Parameters) == 64 &&
               sizeof(Frame) == 176);
 class VulkanContext {
   public:

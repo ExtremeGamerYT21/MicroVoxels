@@ -1,8 +1,8 @@
 # Measured profile and verification
 
-These are historical measurements of the pixel-sampled backend, recorded before triangle occupancy
-became the default. Select `--sample-occupancy` to exercise that backend; the timings below do not describe
-the current triangle path or its larger cell table. See the current CI reports for triangle correctness checks.
+These are historical measurements of the earlier pixel-sampled backend, before the triangle experiment
+and the current generic source-buffer footprints. They use an older table capacity and compaction path.
+See [FOOTPRINTS.md](FOOTPRINTS.md) for current point/footprint and previous-triangle comparisons.
 
 This run used **software Vulkan**, not the user's AMD GPU. The available device was
 `llvmpipe (LLVM 20.1.2, 256 bits)`, Mesa 25.2.8, on Linux. These are Vulkan timestamp

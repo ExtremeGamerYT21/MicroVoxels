@@ -1,0 +1,26 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+struct Slot {
+    uint owner, r, g, b, count, nearest;
+};
+layout(set = 0, binding = 8, std430) readonly buffer Hash {
+    Slot slots[];
+};
+layout(set = 0, binding = 11, std430) writeonly buffer Groups {
+    uint offsets[];
+};
+shared uint counts[256];
+void main() {
+    uint local = gl_LocalInvocationID.x, id = gl_GlobalInvocationID.x;
+    counts[local] = id < uint(params.extent.z) && slots[id].owner != 0u ? 1u : 0u;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (local < stride)
+            counts[local] += counts[local + stride];
+        barrier();
+    }
+    if (local == 0u)
+        offsets[gl_WorkGroupID.x] = counts[0];
+}

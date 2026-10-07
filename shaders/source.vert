@@ -9,13 +9,11 @@ layout(location = 0) out vec3 worldPosition;
 layout(location = 1) out vec3 worldNormal;
 layout(location = 2) out vec3 albedo;
 layout(location = 3) out float gloss;
-layout(location = 4) flat out uint triangleId;
 void main() {
     SourceVertex v = vertices[gl_VertexIndex];
     worldPosition = v.position.xyz;
     worldNormal = v.normal.xyz;
     albedo = v.albedo.xyz;
     gloss = v.normal.w;
-    triangleId = uint(gl_VertexIndex) / 3u + 1u;
     gl_Position = frame.viewProjection * vec4(worldPosition, 1);
 }

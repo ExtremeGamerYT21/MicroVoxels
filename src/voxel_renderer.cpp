@@ -74,7 +74,7 @@ void VoxelRenderer::begin(const Parameters &) {
     bi.pClearValues = clear;
     vkCmdBeginRenderPass(vk.cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
 }
-void VoxelRenderer::draw(const Parameters &p) {
+void VoxelRenderer::draw(const Parameters &p, VkQueryPool queries) {
     vkCmdBindDescriptorSets(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, voxelizer.layout, 0, 1,
                             &voxelizer.sets[voxelizer.current], 0, nullptr);
     vkCmdPushConstants(vk.cmd, voxelizer.layout, VK_SHADER_STAGE_ALL, 0, sizeof(p), &p);
@@ -84,12 +84,16 @@ void VoxelRenderer::draw(const Parameters &p) {
         vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fullscreen);
         vkCmdDraw(vk.cmd, 3, 1, 0, 0);
     }
+    if (queries)
+        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 7);
     if (p.flags.w == 1 || p.flags.w == 2) {
         float half = float(vk.extent.width / 2);
         vk.viewport(p.flags.w == 2 ? half : 0, 0, p.flags.w == 2 ? w - half : w, h);
         vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.flags.z ? debugCubes : cubes);
         vkCmdDrawIndirect(vk.cmd, voxelizer.counters.handle, 0, 1, sizeof(VkDrawIndirectCommand));
     }
+    if (queries)
+        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 8);
 }
 void VoxelRenderer::end() {
     vkCmdEndRenderPass(vk.cmd);

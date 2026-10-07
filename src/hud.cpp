@@ -66,11 +66,11 @@ static std::string number(double v, int precision = 2) {
     return s.str();
 }
 void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6> &t, size_t tris,
-                uint32_t samples, float fps) {
+                uint32_t width, uint32_t height, float fps, double cubeDrawTime) {
     mesh.clear();
     if (!s.visibleHud)
         return;
-    rect(8, 8, 430, 325, {.01f, .018f, .03f, .90f});
+    rect(8, 8, 430, 400, {.01f, .018f, .03f, .90f});
     text(18, 18, "MICROVOXELS - CONTINUOUS SOURCE / UNLIT CUBES", {.30f, .88f, .70f, 1});
     for (int i = 0; i < 3; i++) {
         rect(18 + 140 * i, 37, 130, 21,
@@ -91,26 +91,37 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
     text(18, 151,
          std::string("X: ") + (s.supersampling ? "2X2 SAMPLES" : "1X SAMPLES") + "   H: LIGHT " +
              std::to_string(s.lighting) + "   P: PAUSE");
-    text(18, 173, "TRIANGLES " + std::to_string(tris) + "  SAMPLES " + std::to_string(samples));
-    text(18, 189, "HITS " + std::to_string(c.hits) + "  CUBES " + std::to_string(c.instanceCount));
+    text(18, 173,
+         "SOURCE " + std::to_string(width) + " X " + std::to_string(height) + "  TRI " +
+             std::to_string(tris));
+    text(18, 189, "SAMPLES " + std::to_string(width * height) + "  HITS " + std::to_string(c.hits));
+    text(18, 205,
+         "WRITES " + std::to_string(c.candidateWrites) + "  CUBES " +
+             std::to_string(c.instanceCount));
+    text(18, 221,
+         "WRITES/HIT " + number(c.hits ? double(c.candidateWrites) / c.hits : 0) + "  MAX CELLS " +
+             std::to_string(c.maxFootprintCells));
+    text(18, 237,
+         "RADIUS " + std::to_string(s.footprintRadius) + "  LIMIT " +
+             std::to_string(s.footprintLimit) + "  EXTENT " +
+             number(double(c.maxFootprintExtent) / 1024));
     std::string lod = "LOD";
     for (int i = 0; i < s.levels; i++)
         lod += " " + std::to_string(i) + ":" + std::to_string(c.perLod[i]);
-    text(18, 205, lod);
-    text(18, 221,
-         "FPS " + number(fps, 1) + "  SOURCE " + number(t[0]) + " MS  LOD " + number(t[1]));
-    text(18, 237,
-         "HASH " + number(t[2]) + "  COMPACT " + number(t[3]) + "  DRAW " + number(t[4]) + " MS");
-    text(18, 253,
-         "DROPPED " + std::to_string(c.dropped) + "  ROOT DROPPED " +
-             std::to_string(c.rootDropped));
-    text(18, 272, "WASD QE / RIGHT MOUSE LOOK / F1 HIDE HUD");
-    text(18, 290,
-         c.hits == 0 ? "NO SOURCE HITS - R: RESET VIEW"
-                     : (s.triangleOccupancy ? "R: RESET VIEW / GEOMETRIC CELLS"
-                                            : std::string("R: RESET VIEW / C: ADAPTIVE LOD ") +
-                                                  (s.adaptiveLod ? "ON" : "OFF")));
-    text(18, 309, s.triangleOccupancy ? "T: TRIANGLE OCCUPANCY" : "T: PIXEL SAMPLE OCCUPANCY");
+    text(18, 253, lod);
+    text(18, 269,
+         "FPS " + number(fps, 1) + "  FRAME " + number(1000 / std::max(fps, .01f)) + " MS");
+    text(18, 285,
+         "SOURCE " + number(t[0]) + "  GEN " + number(t[1] + t[2] + t[3]) + "  DRAW " +
+             number(cubeDrawTime) + " MS");
+    text(18, 301,
+         "DROPPED " + std::to_string(c.dropped) + "  CLAMPED " +
+             std::to_string(c.clampedFootprints));
+    text(18, 317, "REJECTED NEIGHBORS " + std::to_string(c.rejectedNeighbors));
+    text(18, 337, s.footprintSplats ? "T: CONSERVATIVE FOOTPRINT SPLATS" : "T: POINT SPLATS");
+    text(18, 355, std::string("C: PROJECTED-SIZE LOD ") + (s.adaptiveLod ? "ON" : "OFF"));
+    text(18, 373,
+         c.hits ? "WASD QE / RIGHT MOUSE / R RESET / F1 HUD" : "NO SOURCE HITS - R: RESET VIEW");
     if (mesh.size() * sizeof(HudVertex) > vertices.size)
         throw std::runtime_error("HUD buffer too small");
     std::memcpy(vertices.mapped, mesh.data(), mesh.size() * sizeof(HudVertex));
@@ -137,6 +148,10 @@ void Hud::click(double x, double y, Settings &s) {
         else if (x >= 238 && x <= 430)
             s.cubeLight = !s.cubeLight;
     }
+    if (y >= 333 && y <= 350 && x >= 18 && x <= 430)
+        s.footprintSplats = !s.footprintSplats;
+    if (y >= 351 && y <= 369 && x >= 18 && x <= 430)
+        s.adaptiveLod = !s.adaptiveLod;
     if (x >= 208 && x <= 418) {
         if (y >= 89 && y <= 107)
             s.base = .005f + .145f * float((x - 208) / 210);

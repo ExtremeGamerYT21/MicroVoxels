@@ -1,7 +1,7 @@
 #include "hud.hpp"
 #include "lattice.hpp"
 #include "source_renderer.hpp"
-#include "triangle_reference.hpp"
+#include "surface_footprint.hpp"
 #include "voxel_renderer.hpp"
 #include <algorithm>
 #include <chrono>
@@ -21,7 +21,7 @@ struct Options {
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
          exerciseControls = false, exerciseStability = false;
     float fixedTime = -1;
-    std::string screenshot, report;
+    std::string screenshot, report, captureSequence;
     Settings settings;
 };
 Options parse(int argc, char **argv) {
@@ -51,8 +51,16 @@ Options parse(int argc, char **argv) {
             o.exerciseControls = true;
         else if (a == "--exercise-stability")
             o.exerciseStability = true;
-        else if (a == "--sample-occupancy")
-            o.settings.triangleOccupancy = false;
+        else if (a == "--sample-occupancy" || a == "--point-splats")
+            o.settings.footprintSplats = false;
+        else if (a == "--footprint-splats")
+            o.settings.footprintSplats = true;
+        else if (a == "--footprint-radius")
+            o.settings.footprintRadius = std::stoi(value());
+        else if (a == "--footprint-limit")
+            o.settings.footprintLimit = std::stoi(value());
+        else if (a == "--capture-sequence")
+            o.captureSequence = value();
         else if (a == "--no-ui")
             o.noUi = true;
         else if (a == "--time")
@@ -86,12 +94,14 @@ Options parse(int argc, char **argv) {
                 << "--voxel-size METERS --lod-distance METERS --levels 1..6 --mode 0|1|2\n"
                 << "--lighting 0|1|2 --debug-cubes --closest --supersampling --time SECONDS\n"
                 << "--no-ui --screenshot FILE.ppm --report FILE.json\n"
-                << "--sample-occupancy --no-adaptive-lod --exercise-controls (16 frames) "
-                   "--exercise-stability (6 frames)\n"
+                << "--point-splats --footprint-splats --footprint-radius 0..2 --footprint-limit "
+                   "1..64\n"
+                << "--capture-sequence DIRECTORY --no-adaptive-lod --exercise-controls (16 frames) "
+                   "--exercise-stability (12 frames)\n"
                 << "WASD/QE fly; right mouse look; Tab view; F freeze; G cube-light debug;\n"
                 << "O average/closest; X supersampling; H lighting; P pause; +/- voxel size;\n"
                 << "[/] LOD distance; 1..6 LOD count; R reset view; C adaptive LOD; F1 HUD; Esc "
-                   "exit; T triangle/pixel occupancy.\n";
+                   "exit; T point/footprint splats.\n";
             std::exit(0);
         } else
             throw std::runtime_error("Unknown option: " + a);
@@ -101,17 +111,17 @@ Options parse(int argc, char **argv) {
     if (o.settings.base < .005f || o.settings.base > .15f || o.settings.distance < 1 ||
         o.settings.distance > 12 || o.settings.levels < 1 || o.settings.levels > 6 ||
         o.settings.mode < 0 || o.settings.mode > 2 || o.settings.lighting < 0 ||
-        o.settings.lighting > 2)
+        o.settings.lighting > 2 || o.settings.footprintRadius < 0 ||
+        o.settings.footprintRadius > 2 || o.settings.footprintLimit < 1 ||
+        o.settings.footprintLimit > 64)
         throw std::runtime_error("Settings out of range; see --help");
     if (o.exercise && o.frames < 8)
         throw std::runtime_error("--exercise requires --frames 8 or more");
     if (o.exerciseControls && (o.frames < 16 || o.exercise))
         throw std::runtime_error(
             "--exercise-controls requires 16 frames and cannot combine with --exercise");
-    if (o.exerciseStability &&
-        (o.frames < 6 || o.exercise || o.exerciseControls || !o.settings.triangleOccupancy))
-        throw std::runtime_error(
-            "--exercise-stability requires 6 frames, triangle occupancy, and no other exercise");
+    if (o.exerciseStability && (o.frames < 12 || o.exercise || o.exerciseControls))
+        throw std::runtime_error("--exercise-stability requires 12 frames and no other exercise");
     if (o.exerciseStability) {
         o.verify = true;
         o.fixedTime = 1;
@@ -153,8 +163,8 @@ void keyCallback(GLFWwindow *w, int key, int, int action, int) {
     if (key == GLFW_KEY_R)
         resetCamera(w, in);
     if (key == GLFW_KEY_T)
-        s.triangleOccupancy = !s.triangleOccupancy;
-    if (key == GLFW_KEY_C && !s.triangleOccupancy)
+        s.footprintSplats = !s.footprintSplats;
+    if (key == GLFW_KEY_C)
         s.adaptiveLod = !s.adaptiveLod;
     if (key == GLFW_KEY_ESCAPE)
         glfwSetWindowShouldClose(w, 1);
@@ -269,7 +279,7 @@ void exerciseControls(int frame, GLFWwindow *w, Input &in) {
         press(GLFW_KEY_C);
     }
     if (frame == 6) {
-        if (!s.triangleOccupancy)
+        if (!s.footprintSplats)
             press(GLFW_KEY_T);
         s.base = .0216f;
         s.distance = 8.6f;
@@ -290,7 +300,7 @@ void exerciseControls(int frame, GLFWwindow *w, Input &in) {
         press(GLFW_KEY_TAB);
         press(GLFW_KEY_6);
         press(GLFW_KEY_C);
-        s.base = s.triangleOccupancy ? .015f : .0057f;
+        s.base = .0057f;
         int width, height;
         glfwGetWindowSize(w, &width, &height);
         glfwSetWindowSize(w, width + 64, height + 48);
@@ -301,7 +311,7 @@ void exerciseControls(int frame, GLFWwindow *w, Input &in) {
     }
     if (frame == 12) {
         press(GLFW_KEY_6);
-        s.base = s.triangleOccupancy ? .015f : .0057f;
+        s.base = .0057f;
     }
     if (frame == 13) {
         mouseButton(w, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, 0);
@@ -339,36 +349,28 @@ void copyImage(VulkanContext &vk, Image &im, Buffer &buffer, VkImageLayout layou
 }
 struct Readback {
     VulkanContext &vk;
-    Buffer counters, instances, positions, colors, lods, pixels, triangleIds, sourceVertices,
-        rootLods, shadow;
-    Readback(VulkanContext &context, bool verify, uint32_t vertexCount) : vk(context) {
+    Buffer counters, instances, positions, colors, lods, pixels, depths;
+    Readback(VulkanContext &context, bool verify) : vk(context) {
         counters = vk.buffer(sizeof(Counters), VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-        if (verify) {
+        if (verify)
             instances = vk.buffer(VisualVoxelizer::Capacity * sizeof(Voxel),
                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-            sourceVertices = vk.buffer(vertexCount * sizeof(SourceVertex),
-                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-            rootLods = vk.buffer(VisualVoxelizer::RootCapacity * 8ull,
-                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-            shadow = vk.buffer(1024 * 1024 * 4ull, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-        }
     }
-    void resize(uint32_t w, uint32_t h, VkExtent2D display, bool verify, bool screenshot) {
-        for (auto b : {&positions, &colors, &lods, &pixels, &triangleIds})
+    void resize(uint32_t w, uint32_t h, VkExtent2D display, bool verify, bool capture) {
+        for (auto b : {&positions, &colors, &lods, &pixels, &depths})
             vk.destroy(*b);
         if (verify) {
             positions = vk.buffer(w * uint64_t(h) * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
             colors = vk.buffer(positions.size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
             lods = vk.buffer(w * uint64_t(h) * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-            triangleIds = vk.buffer(lods.size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            depths = vk.buffer(lods.size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
         }
-        if (screenshot)
+        if (capture)
             pixels = vk.buffer(display.width * uint64_t(display.height) * 4,
                                VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
     }
     ~Readback() {
-        for (auto b : {&counters, &instances, &positions, &colors, &lods, &pixels, &triangleIds,
-                       &sourceVertices, &rootLods, &shadow})
+        for (auto b : {&counters, &instances, &positions, &colors, &lods, &pixels, &depths})
             vk.destroy(*b);
     }
 };
@@ -378,38 +380,19 @@ struct ReferenceCell {
     float nearestDepth = 1e30f;
 };
 using RootHistory = std::map<std::array<int32_t, 3>, int>;
-float sampleFootprint(const glm::vec4 *positions, uint32_t id, int width, int height) {
-    int x = int(id % uint32_t(width)), y = int(id / uint32_t(width));
-    glm::vec3 span(0), hit(positions[id]);
-    for (int axis = 0; axis < 2; axis++) {
-        glm::vec3 step(0);
-        float nearest = 3.402823e38f;
-        for (int sign : {-1, 1}) {
-            int nx = x + (axis == 0 ? sign : 0), ny = y + (axis == 1 ? sign : 0);
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height)
-                continue;
-            const auto &neighbor = positions[ny * width + nx];
-            if (neighbor.w == 0)
-                continue;
-            glm::vec3 delta = glm::vec3(neighbor) - hit;
-            float separation = glm::dot(delta, delta);
-            if (separation < nearest) {
-                nearest = separation;
-                step = glm::abs(delta);
-            }
-        }
-        span += step;
-    }
-    return 1.25f * std::max(span.x, std::max(span.y, span.z));
-}
 void verify(const Parameters &p, const Frame &f, const Readback &readback, const Counters &c,
-            RootHistory &history) {
+            RootHistory &history, float &reconstructionError) {
     if (c.vertexCount != 36 || c.firstVertex != 0 || c.firstInstance != 0)
         throw std::runtime_error("Invalid GPU indirect cube draw command");
     auto *positions = static_cast<const glm::vec4 *>(readback.positions.mapped);
     auto *colors = static_cast<const glm::vec4 *>(readback.colors.mapped);
     auto *lods = static_cast<const uint32_t *>(readback.lods.mapped);
     auto *instances = static_cast<const Voxel *>(readback.instances.mapped);
+    auto *depths = static_cast<const float *>(readback.depths.mapped);
+    auto inverse = glm::inverse(f.vp);
+    // Raster edge snapping and attribute interpolation are not exact inverse projection.
+    // Allow an eighth of a source pixel, while checking world/depth error separately.
+    glm::vec3 projectionTolerance(.25f / p.extent.x, .25f / p.extent.y, .00001f);
     if (c.dropped || c.rootDropped)
         throw std::runtime_error("Verification requires an unsaturated hash table");
     std::map<Cell, ReferenceCell> expected;
@@ -426,38 +409,104 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
             int lod =
                 chooseLod(glm::distance(glm::vec3(rc[0], rc[1], rc[2]), glm::vec3(f.cameraTime)),
                           p.config.y, p.flags.x, previous, p.config.z);
-            if (f.options.y != 0)
+            if (f.options.y != 0) {
+                auto patch = sourceFootprint(positions, i, p, f);
+                auto span = glm::abs(patch.dx) + glm::abs(patch.dy);
+                float footprint = 1.25f * std::max({span.x, span.y, span.z});
                 lod = std::max(
-                    lod, chooseCoverageLod(sampleFootprint(positions, i, p.extent.x, p.extent.y),
-                                           p.config.x, p.flags.x, previous, p.config.z));
+                    lod, chooseCoverageLod(footprint, p.config.x, p.flags.x, previous, p.config.z));
+            }
             auto [region, inserted] = current.emplace(root, lod);
             if (!inserted)
                 region->second = std::max(region->second, lod);
         }
-    uint32_t hits = 0;
+    uint32_t hits = 0, candidates = 0, maxCells = 0, clamped = 0, rejected = 0, maxExtent = 0;
     std::array<uint32_t, 8> expectedLods{};
     for (uint32_t i = 0; i < uint32_t(p.extent.x * p.extent.y); i++)
         if (positions[i].w != 0) {
-            glm::vec3 pos = glm::vec3(positions[i]);
-            auto root4 = cell({pos.x, pos.y, pos.z}, p.config.x, p.flags.x - 1);
-            std::array<int32_t, 3> root = {root4[0], root4[1], root4[2]};
-            int expectedLod = current.at(root);
-            if (lods[i] != uint32_t(expectedLod))
+            glm::vec3 pos(positions[i]);
+            int x = int(i % uint32_t(p.extent.x)), y = int(i / uint32_t(p.extent.x));
+            glm::vec4 ndc(2 * (x + .5f) / p.extent.x - 1, 2 * (y + .5f) / p.extent.y - 1, depths[i],
+                          1);
+            auto reconstructed = inverse * ndc;
+            auto projected = f.vp * glm::vec4(pos, 1);
+            float error = glm::distance(pos, glm::vec3(reconstructed) / reconstructed.w);
+            reconstructionError = std::max(reconstructionError, error);
+            if (error > .0005f * std::max(1.f, glm::distance(pos, glm::vec3(f.cameraTime))) ||
+                glm::any(
+                    glm::greaterThan(glm::abs(glm::vec3(projected) / projected.w - glm::vec3(ndc)),
+                                     projectionTolerance)))
                 throw std::runtime_error(
-                    "GPU LOD differs from world-root CPU coverage/hysteresis reference");
-            auto key = cell({pos.x, pos.y, pos.z}, p.config.x, int(lods[i]));
-            auto &ref = expected[key];
+                    "Cached world position does not agree with Vulkan depth: pixel " +
+                    std::to_string(i) + " error " + std::to_string(error) + " depth " +
+                    std::to_string(depths[i]) + " expected " +
+                    std::to_string(projected.z / projected.w) + " xy " +
+                    std::to_string(projected.x / projected.w - ndc.x) + "," +
+                    std::to_string(projected.y / projected.w - ndc.y));
+            auto root4 = cell({pos.x, pos.y, pos.z}, p.config.x, p.flags.x - 1);
+            std::array<int32_t, 3> root{root4[0], root4[1], root4[2]};
+            int lod = current.at(root);
+            if (lods[i] != uint32_t(lod))
+                throw std::runtime_error("GPU LOD differs from CPU coverage/hysteresis reference");
+            auto key = cell({pos.x, pos.y, pos.z}, p.config.x, lod);
+            float h = std::ldexp(p.config.x, lod);
+            auto patch = boundedFootprint(positions, i, p, f, h);
+            auto extent = .5f * (glm::abs(patch.dx) + glm::abs(patch.dy));
+            maxExtent =
+                std::max(maxExtent,
+                         uint32_t(std::round(std::max({extent.x, extent.y, extent.z}) / h * 1024)));
+            rejected += patch.rejected;
+            uint32_t emitted = 0;
+            auto contribute = [&](const Cell &cellKey) {
+                auto &ref = expected[cellKey];
+                candidates++;
+                emitted++;
+                ref.count++;
+                ref.r += uint32_t(std::round(std::clamp(colors[i].r, 0.f, 1.f) * 1023));
+                ref.g += uint32_t(std::round(std::clamp(colors[i].g, 0.f, 1.f) * 1023));
+                ref.b += uint32_t(std::round(std::clamp(colors[i].b, 0.f, 1.f) * 1023));
+                float d = glm::distance(pos, glm::vec3(f.cameraTime));
+                if (d < ref.nearestDepth || (d == ref.nearestDepth && i < ref.nearest)) {
+                    ref.nearestDepth = d;
+                    ref.nearest = i;
+                }
+            };
             hits++;
-            ref.count++;
-            ref.r += uint32_t(std::round(std::clamp(colors[i].r, 0.f, 1.f) * 1023));
-            ref.g += uint32_t(std::round(std::clamp(colors[i].g, 0.f, 1.f) * 1023));
-            ref.b += uint32_t(std::round(std::clamp(colors[i].b, 0.f, 1.f) * 1023));
-            float d = glm::distance(pos, glm::vec3(f.cameraTime));
-            if (d < ref.nearestDepth || (d == ref.nearestDepth && i < ref.nearest)) {
-                ref.nearestDepth = d;
-                ref.nearest = i;
-            }
+            contribute(key);
+            glm::ivec3 own(key[0], key[1], key[2]), radius(p.footprint.x);
+            auto first = glm::max(glm::ivec3(glm::floor((pos - extent) / h)) - own, -radius);
+            auto last = glm::min(glm::ivec3(glm::floor((pos + extent) / h)) - own, radius);
+            for (int z = first.z; z <= last.z; z++)
+                for (int y = first.y; y <= last.y; y++)
+                    for (int x = first.x; x <= last.x; x++) {
+                        if (x == 0 && y == 0 && z == 0)
+                            continue;
+                        Cell other{key[0] + x, key[1] + y, key[2] + z, lod};
+                        float span = float(1 << (p.flags.x - 1 - lod));
+                        std::array<int32_t, 3> target{int32_t(std::floor(other[0] / span)),
+                                                      int32_t(std::floor(other[1] / span)),
+                                                      int32_t(std::floor(other[2] / span))};
+                        auto region = current.find(target);
+                        if (p.flags.x > 1 && (region == current.end() || region->second != lod))
+                            continue;
+                        auto c = center(other, p.config.x);
+                        if (!referenceFootprintBox(pos, patch, {c[0], c[1], c[2]}, h))
+                            continue;
+                        if (emitted >= uint32_t(p.footprint.y)) {
+                            patch.clamped = true;
+                            continue;
+                        }
+                        contribute(other);
+                    }
+            maxCells = std::max(maxCells, emitted);
+            if (patch.clamped)
+                clamped++;
         }
+    if (candidates != c.candidateWrites || maxCells != c.maxFootprintCells ||
+        clamped != c.clampedFootprints || rejected != c.rejectedNeighbors ||
+        std::abs(int64_t(maxExtent) - c.maxFootprintExtent) > 1)
+        throw std::runtime_error(
+            "GPU footprint candidate/limit statistics differ from CPU reference");
     if (hits != c.hits || expected.size() != c.instanceCount)
         throw std::runtime_error("GPU hit or unique-cell count differs from CPU reference");
     for (uint32_t i = 0; i < c.instanceCount; i++) {
@@ -534,10 +583,10 @@ int main(int argc, char **argv) {
         {
             SourceWorld world;
             SourceRenderer source(vk, world, frameBuffer);
-            VisualVoxelizer voxelizer(vk, frameBuffer, source.triangles());
+            VisualVoxelizer voxelizer(vk, frameBuffer);
             VoxelRenderer renderer(vk, voxelizer);
             Hud hud(vk, renderer.pass, voxelizer.setLayout);
-            Readback readback(vk, opt.verify || opt.exercise, source.vertexCount);
+            Readback readback(vk, opt.verify || opt.exercise);
             Settings &s = opt.settings;
             glm::vec3 camera(5.8f, 3.6f, 8.4f);
             Input input{&s, &hud, &camera};
@@ -551,7 +600,7 @@ int main(int argc, char **argv) {
             if (vk.timestampBits) {
                 VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-                ci.queryCount = 7;
+                ci.queryCount = 9;
                 check(vkCreateQueryPool(vk.device, &ci, nullptr, &queries), "timestamp query pool");
             }
             bool resize = true;
@@ -559,11 +608,15 @@ int main(int argc, char **argv) {
             Counters counts{};
             std::array<double, 6> times{}, totals{};
             int timedFrames = 0;
+            double cubeDrawTime = 0, cubeDrawTotal = 0;
             RootHistory history;
             std::vector<Voxel> frozenSnapshot;
             Counters frozenCounts{};
             int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0, stabilityChecks = 0;
+            uint64_t motionAdded = 0, motionRemoved = 0;
+            float reconstructionError = 0;
             std::map<Cell, glm::vec4> stableCells;
+            std::map<Cell, glm::vec4> stationaryCloud;
             auto last = std::chrono::steady_clock::now();
             float animation = 0, fps = 60;
             int frameNumber = 0;
@@ -573,27 +626,16 @@ int main(int argc, char **argv) {
                 glfwPollEvents();
                 if (opt.exerciseControls && frameNumber < 16)
                     exerciseControls(frameNumber, vk.window, input);
-                if (opt.exerciseStability) {
-                    if (frameNumber == 0) {
+                if (opt.exerciseStability && frameNumber < 12) {
+                    s.frozen = false;
+                    s.levels = 1;
+                    s.lighting = 0;
+                    s.adaptiveLod = false;
+                    if (frameNumber == 0)
                         resetCamera(vk.window, input);
-                        s.base = .02f;
-                        s.levels = 1;
-                        s.lighting = 0;
-                    }
-                    if (frameNumber == 1)
-                        input.yaw += .003f;
-                    if (frameNumber == 2)
-                        camera.x += .02f;
-                    if (frameNumber == 3) {
-                        camera.y += .04f;
-                        input.pitch += .005f;
-                    }
-                    if (frameNumber == 4)
-                        s.supersampling = true;
-                    if (frameNumber == 5) {
-                        int w, h;
-                        glfwGetWindowSize(vk.window, &w, &h);
-                        glfwSetWindowSize(vk.window, w + 32, h + 24);
+                    if (frameNumber >= 3) {
+                        camera.x += .002f;
+                        input.yaw += .00025f;
                     }
                 }
                 int fw, fh;
@@ -627,8 +669,7 @@ int main(int argc, char **argv) {
                 if (s.supersampling != previous.supersampling)
                     resize = true;
                 if (s.base != previous.base || s.levels != previous.levels ||
-                    (!s.triangleOccupancy && s.adaptiveLod != previous.adaptiveLod) ||
-                    s.triangleOccupancy != previous.triangleOccupancy) {
+                    s.adaptiveLod != previous.adaptiveLod) {
                     voxelizer.resetHistory = true;
                     history.clear();
                 }
@@ -642,9 +683,10 @@ int main(int argc, char **argv) {
                     uint32_t w = std::max(1u, uint32_t(fw * scale)),
                              h = std::max(1u, uint32_t(fh * scale));
                     source.resize(w, h);
-                    voxelizer.resize(source.samples(), source.triangles());
+                    voxelizer.resize(source.samples());
                     renderer.resize();
-                    readback.resize(w, h, vk.extent, opt.verify, !opt.screenshot.empty());
+                    readback.resize(w, h, vk.extent, opt.verify,
+                                    !opt.screenshot.empty() || !opt.captureSequence.empty());
                     history.clear();
                     resize = false;
                 }
@@ -683,29 +725,20 @@ int main(int argc, char **argv) {
                 frame.light = glm::vec4(light, 1.15f);
                 frame.options =
                     glm::vec4(float(s.lighting), s.adaptiveLod ? 1.f : 0.f,
-                              s.triangleOccupancy ? 1.f : 0.f, float(world.triangleCount()));
+                              s.footprintSplats ? 1.f : 0.f, float(world.triangleCount()));
                 std::memcpy(frameBuffer.mapped, &frame, sizeof(frame));
                 parameters.extent = {int(source.width), int(source.height),
                                      int(VisualVoxelizer::Capacity),
                                      int(VisualVoxelizer::Capacity)};
                 parameters.config = {s.base, s.distance, .1f, s.splat};
                 parameters.flags = {s.levels, s.average ? 1 : 0, s.cubeLight ? 1 : 0, s.mode};
-                auto triangles = source.triangles();
-                float rootSize = s.base * 32.f;
-                glm::ivec3 gridMin(glm::floor(triangles.lower / rootSize - .0001f)),
-                    gridMax(glm::floor(triangles.upper / rootSize + .0001f));
-                glm::ivec3 gridExtent = gridMax - gridMin + 1;
-                if (uint64_t(gridExtent.x) * gridExtent.y * gridExtent.z >
-                    VisualVoxelizer::RootCapacity)
-                    throw std::runtime_error("Triangle LOD grid exceeds region capacity");
-                parameters.gridMin = glm::ivec4(gridMin, 0);
-                parameters.gridExtent = glm::ivec4(gridExtent, VisualVoxelizer::CandidateCapacity);
+                parameters.footprint = {s.footprintRadius, s.footprintLimit, 0, 0};
                 bool generating = !s.frozen || !voxelizer.cloudReady;
                 bool referenceReset = voxelizer.resetHistory;
                 if (referenceReset)
                     history.clear();
-                hud.build(s, counts, times, world.triangleCount(), source.width * source.height,
-                          fps);
+                hud.build(s, counts, times, world.triangleCount(), source.width, source.height, fps,
+                          cubeDrawTime);
                 uint32_t swapIndex;
                 VkResult acquired = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
                                                           vk.acquired, VK_NULL_HANDLE, &swapIndex);
@@ -718,20 +751,20 @@ int main(int argc, char **argv) {
                     check(acquired, "acquire image");
                 vk.begin();
                 if (queries) {
-                    vkCmdResetQueryPool(vk.cmd, queries, 0, 7);
+                    vkCmdResetQueryPool(vk.cmd, queries, 0, 9);
                     vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
                 }
                 source.render(voxelizer.current, parameters);
                 if (queries)
                     vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
                 if (generating)
-                    voxelizer.generate(parameters, queries, s.triangleOccupancy);
+                    voxelizer.generate(parameters, queries);
                 else if (queries)
                     for (uint32_t i = 2; i <= 4; i++)
                         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries,
                                             i);
                 renderer.begin(parameters);
-                renderer.draw(parameters);
+                renderer.draw(parameters, queries);
                 if (queries)
                     vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 5);
                 hud.draw();
@@ -753,22 +786,12 @@ int main(int argc, char **argv) {
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     copyImage(vk, source.color, readback.colors,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                    if (s.triangleOccupancy) {
-                        copyImage(vk, source.triangleIds, readback.triangleIds,
-                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                        copyImage(vk, source.shadow, readback.shadow,
-                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
-                        VkBufferCopy verticesCopy{0, 0, source.animatedVertices.size},
-                            rootsCopy{0, 0, voxelizer.roots[voxelizer.current].size};
-                        vkCmdCopyBuffer(vk.cmd, source.animatedVertices.handle,
-                                        readback.sourceVertices.handle, 1, &verticesCopy);
-                        vkCmdCopyBuffer(vk.cmd, voxelizer.roots[voxelizer.current].handle,
-                                        readback.rootLods.handle, 1, &rootsCopy);
-                    } else
-                        copyImage(vk, voxelizer.lods[voxelizer.current], readback.lods,
-                                  VK_IMAGE_LAYOUT_GENERAL);
+                    copyImage(vk, voxelizer.lods[voxelizer.current], readback.lods,
+                              VK_IMAGE_LAYOUT_GENERAL);
+                    copyImage(vk, source.depth, readback.depths,
+                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
                 }
-                if (!opt.screenshot.empty())
+                if (!opt.screenshot.empty() || !opt.captureSequence.empty())
                     copyImage(vk, renderer.output, readback.pixels,
                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
                 VkImageMemoryBarrier sb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -821,8 +844,8 @@ int main(int argc, char **argv) {
                     controlChecks++;
                 }
                 if (queries) {
-                    std::array<uint64_t, 7> stamps{};
-                    check(vkGetQueryPoolResults(vk.device, queries, 0, 7, sizeof(stamps),
+                    std::array<uint64_t, 9> stamps{};
+                    check(vkGetQueryPoolResults(vk.device, queries, 0, 9, sizeof(stamps),
                                                 stamps.data(), 8,
                                                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
                           "read timestamps");
@@ -832,57 +855,58 @@ int main(int argc, char **argv) {
                     for (int i = 0; i < 6; i++)
                         times[i] =
                             double((stamps[i + 1] - stamps[i]) & mask) * vk.timestampPeriod / 1e6;
+                    cubeDrawTime =
+                        double((stamps[8] - stamps[7]) & mask) * vk.timestampPeriod / 1e6;
                     if (frameNumber >= 2 && generating) {
                         for (int i = 0; i < 6; i++)
                             totals[i] += times[i];
+                        cubeDrawTotal += cubeDrawTime;
                         timedFrames++;
                     }
                 }
+                if (!opt.captureSequence.empty()) {
+                    std::ostringstream name;
+                    name << opt.captureSequence << "/frame-" << std::setfill('0') << std::setw(3)
+                         << frameNumber << ".ppm";
+                    screenshot(name.str(), vk, readback);
+                }
                 if (opt.verify && generating) {
-                    if (s.triangleOccupancy)
-                        verifyTriangles(
-                            parameters, frame,
-                            static_cast<const SourceVertex *>(readback.sourceVertices.mapped),
-                            static_cast<const uint32_t *>(readback.triangleIds.mapped),
-                            static_cast<const uint32_t *>(readback.rootLods.mapped),
-                            static_cast<const float *>(readback.shadow.mapped),
-                            static_cast<const Voxel *>(readback.instances.mapped), counts, history);
-                    else
-                        verify(parameters, frame, readback, counts, history);
+                    verify(parameters, frame, readback, counts, history, reconstructionError);
                     verifiedFrames++;
                 }
-                if (opt.exerciseStability && frameNumber < 6) {
+                if (opt.exerciseStability && frameNumber < 12) {
                     if (!generating)
                         throw std::runtime_error("Stability test froze generation");
-                    std::map<Cell, glm::vec4> cells;
+                    std::map<Cell, glm::vec4> cloud, patch;
                     auto *data = static_cast<const Voxel *>(readback.instances.mapped);
                     for (uint32_t i = 0; i < counts.instanceCount; i++) {
                         const auto &v = data[i];
+                        auto key =
+                            cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, s.base, 0);
+                        cloud.emplace(key, v.rgba);
                         if (v.centerSize.x >= -4.3f && v.centerSize.x <= -3.7f &&
-                            std::abs(v.centerSize.z) <= .3f && std::abs(v.centerSize.y) < .011f)
-                            cells.emplace(
-                                cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, s.base, 0),
-                                v.rgba);
+                            std::abs(v.centerSize.z) <= .3f && std::abs(v.centerSize.y) < s.base)
+                            patch.emplace(key, v.rgba);
                     }
-                    if (frameNumber == 0) {
-                        if (cells.size() < 500)
+                    if (frameNumber == 0)
+                        stationaryCloud = cloud;
+                    if (frameNumber == 1 || frameNumber == 2) {
+                        if (cloud != stationaryCloud)
                             throw std::runtime_error(
-                                "Stability scene did not cover the test patch");
-                        stableCells = cells;
-                    } else {
-                        if (cells.size() != stableCells.size())
-                            throw std::runtime_error(
-                                "Camera or sampling resolution changed static triangle occupancy");
-                        for (const auto &[key, color] : stableCells) {
-                            auto found = cells.find(key);
-                            if (found == cells.end() ||
-                                glm::any(glm::greaterThan(glm::abs(found->second - color),
-                                                          glm::vec4(.000001f))))
-                                throw std::runtime_error("Camera or sampling resolution changed "
-                                                         "static triangle cells or albedo");
-                        }
+                                "Stationary raster cloud changed cell keys or RGB");
                         stabilityChecks++;
                     }
+                    if (patch.size() < 25)
+                        throw std::runtime_error("Motion test floor patch is not visible");
+                    if (frameNumber >= 3) {
+                        for (const auto &[key, color] : patch)
+                            if (!stableCells.contains(key))
+                                motionAdded++;
+                        for (const auto &[key, color] : stableCells)
+                            if (!patch.contains(key))
+                                motionRemoved++;
+                    }
+                    stableCells = std::move(patch);
                 }
                 if (opt.exercise) {
                     auto *data = static_cast<const Voxel *>(readback.instances.mapped);
@@ -925,19 +949,16 @@ int main(int argc, char **argv) {
                 std::cout << "Camera reset, mouse capture/focus, settings and resize checks: "
                           << controlChecks << '\n';
             if (opt.exerciseStability)
-                std::cout << "Live triangle stability: " << stableCells.size()
-                          << " identical cells/colours across " << stabilityChecks
-                          << " camera/resolution changes\n";
+                std::cout << "Static-camera checks: " << stabilityChecks
+                          << "; moving floor patch: " << motionAdded << " cell additions, "
+                          << motionRemoved << " removals\n";
             if (timedFrames)
                 for (int i = 0; i < 6; i++)
                     totals[i] /= timedFrames;
-            const char *labels[] = {"source_and_shadow_ms",
-                                    s.triangleOccupancy ? "visibility_lod_occupancy_ms"
-                                                        : "lod_and_clear_ms",
-                                    "hash_ms",
-                                    "compact_ms",
-                                    "final_render_ms",
-                                    "hud_ms"};
+            if (timedFrames)
+                cubeDrawTotal /= timedFrames;
+            const char *labels[] = {"source_and_shadow_ms", "lod_and_clear_ms", "hash_ms",
+                                    "compact_ms",           "final_render_ms",  "hud_ms"};
             if (!opt.report.empty()) {
                 auto parent = std::filesystem::path(opt.report).parent_path();
                 if (!parent.empty())
@@ -963,12 +984,32 @@ int main(int argc, char **argv) {
                   << camera.x << ", " << camera.y << ", " << camera.z << "]"
                   << ",\n  \"camera_yaw\": " << input.yaw
                   << ",\n  \"camera_pitch\": " << input.pitch << ",\n  \"occupancy_backend\": \""
-                  << (s.triangleOccupancy ? "triangle-box" : "pixel-samples") << "\""
-                  << ",\n  \"triangle_contributions\": " << counts.pad
+                  << (s.footprintSplats ? "raster-footprints" : "raster-points") << "\""
+                  << ",\n  \"candidate_voxel_writes\": " << counts.candidateWrites
+                  << ",\n  \"writes_per_valid_sample\": "
+                  << (counts.hits ? double(counts.candidateWrites) / counts.hits : 0)
+                  << ",\n  \"writes_per_source_sample\": "
+                  << double(counts.candidateWrites) / (source.width * source.height)
+                  << ",\n  \"max_footprint_cells\": " << counts.maxFootprintCells
+                  << ",\n  \"max_footprint_extent_cells\": "
+                  << double(counts.maxFootprintExtent) / 1024
+                  << ",\n  \"clamped_footprints\": " << counts.clampedFootprints
+                  << ",\n  \"rejected_neighbors\": " << counts.rejectedNeighbors
+                  << ",\n  \"footprint_radius_cells\": " << s.footprintRadius
+                  << ",\n  \"footprint_write_limit\": " << s.footprintLimit
+                  << ",\n  \"source_width\": " << source.width
+                  << ",\n  \"source_height\": " << source.height
+                  << ",\n  \"depth_reconstruction_max_error_m\": "
+                  << (opt.verify ? std::to_string(reconstructionError) : "null")
+                  << ",\n  \"motion_patch_cell_additions\": " << motionAdded
+                  << ",\n  \"motion_patch_cell_removals\": " << motionRemoved
+                  << ",\n  \"stationary_cloud_cells_checked\": " << stationaryCloud.size()
+                  << ",\n  \"gpu_generation_ms\": " << totals[1] + totals[2] + totals[3]
+                  << ",\n  \"final_voxel_draw_ms\": " << cubeDrawTotal << ",\n  \"gpu_frame_ms\": "
+                  << totals[0] + totals[1] + totals[2] + totals[3] + totals[4] + totals[5]
                   << ",\n  \"stability_checks\": " << stabilityChecks
                   << ",\n  \"stable_cells_checked\": " << stableCells.size()
-                  << ",\n  \"adaptive_lod\": "
-                  << (!s.triangleOccupancy && s.adaptiveLod ? "true" : "false")
+                  << ",\n  \"adaptive_lod\": " << (s.adaptiveLod ? "true" : "false")
                   << ",\n  \"validation_errors\": " << vk.validationErrors
                   << ",\n  \"timestamp_supported\": " << (queries ? "true" : "false")
                   << ",\n  \"voxels_per_lod\": [";

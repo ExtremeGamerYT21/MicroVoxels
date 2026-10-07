@@ -2,6 +2,10 @@
 #include <glm/glm.hpp>
 #include <vector>
 namespace micro {
+struct SourceVertex {
+    glm::vec4 position, normal, albedo;
+};
+static_assert(sizeof(SourceVertex) == 48);
 struct Vertex {
     glm::vec3 position, normal, color;
     glm::vec2 material;

@@ -1,0 +1,99 @@
+{
+  "previous_triangle_commit": "a01e50cf689352396d15f796b660111a992876bc",
+  "driver": "Mesa 25.2.8 software llvmpipe; not physical GPU timings",
+  "comparison": {
+    "stationary_rgb_frames_identical": true,
+    "matched_source_frames_identical": true,
+    "source_interior_pixels": 88081,
+    "point_void_pixels": 14181,
+    "footprint_void_pixels": 12,
+    "point_silhouette_temporal_error": 6076,
+    "footprint_silhouette_temporal_error": 791,
+    "silhouette_temporal_error_reduction_percent": 86.9815668202765,
+    "point_floor_patch_cell_changes": 2030,
+    "footprint_floor_patch_cell_changes": 1614,
+    "floor_patch_cell_change_reduction_percent": 20.49261083743842
+  },
+  "depth_reconstruction_max_error_m": 0.00134483,
+  "motion_verified_frames": {
+    "points": 12,
+    "footprints": 12
+  },
+  "profiles": {
+    "points": {
+      "device": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "frames": 12,
+      "timed_frames_after_warmup": 10,
+      "samples": 307200,
+      "hits": 183023,
+      "unique_voxels": 174752,
+      "candidate_voxel_writes": 183023,
+      "writes_per_valid_sample": 1,
+      "max_footprint_cells": 1,
+      "clamped_footprints": 0,
+      "rejected_neighbors": 0,
+      "dropped_hits": 0,
+      "dropped_root_history_samples": 0,
+      "validation_errors": 0,
+      "gpu_generation_ms": 106.744,
+      "final_voxel_draw_ms": 311.687,
+      "gpu_frame_ms": 463.869,
+      "average_gpu_timings": {
+        "source_and_shadow_ms": 7.43086,
+        "lod_and_clear_ms": 17.0065,
+        "hash_ms": 34.1347,
+        "compact_ms": 55.6031,
+        "final_render_ms": 346.235,
+        "hud_ms": 3.45888
+      }
+    },
+    "footprints": {
+      "device": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "frames": 12,
+      "timed_frames_after_warmup": 10,
+      "samples": 307200,
+      "hits": 183023,
+      "unique_voxels": 669048,
+      "candidate_voxel_writes": 1070484,
+      "writes_per_valid_sample": 5.8489,
+      "max_footprint_cells": 16,
+      "clamped_footprints": 176643,
+      "rejected_neighbors": 4630,
+      "dropped_hits": 0,
+      "dropped_root_history_samples": 0,
+      "validation_errors": 0,
+      "gpu_generation_ms": 132.234,
+      "final_voxel_draw_ms": 1208.85,
+      "gpu_frame_ms": 1376.63,
+      "average_gpu_timings": {
+        "source_and_shadow_ms": 7.06992,
+        "lod_and_clear_ms": 53.2658,
+        "hash_ms": 28.6124,
+        "compact_ms": 50.3559,
+        "final_render_ms": 1237.15,
+        "hud_ms": 0.176141
+      }
+    },
+    "previous_triangles": {
+      "device": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "frames": 8,
+      "timed_frames_after_warmup": 6,
+      "samples": 307200,
+      "hits": 183023,
+      "unique_voxels": 2638885,
+      "triangle_contributions": 2689565,
+      "dropped_hits": 0,
+      "dropped_root_history_samples": 0,
+      "validation_errors": 0,
+      "average_gpu_timings": {
+        "source_and_shadow_ms": 5.42112,
+        "visibility_lod_occupancy_ms": 248.175,
+        "hash_ms": 71.7778,
+        "compact_ms": 0.128557,
+        "final_render_ms": 2892.12,
+        "hud_ms": 0.160111
+      },
+      "gpu_generation_ms": 320.081357
+    }
+  }
+}

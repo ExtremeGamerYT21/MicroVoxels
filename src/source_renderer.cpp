@@ -10,17 +10,10 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
     animatedVertices = vk.buffer(originalVertices.size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                             VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     auto *data = static_cast<SourceVertex *>(originalVertices.mapped);
-    lower = glm::vec3(1e30f);
-    upper = glm::vec3(-1e30f);
     for (uint32_t i = 0; i < vertexCount; i++) {
         const auto &v = world.vertices[i];
         data[i] = {glm::vec4(v.position, v.material.x), glm::vec4(v.normal, v.material.y),
                    glm::vec4(v.color, 1)};
-        float y = std::max(v.position.y - .5f, 0.f);
-        glm::vec3 motion(.13f * std::abs(v.material.x) * y * y, 0,
-                         .055f * std::abs(v.material.x) * y * y);
-        lower = glm::min(lower, v.position - motion);
-        upper = glm::max(upper, v.position + motion);
     }
     VkDescriptorSetLayoutBinding bindings[] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr},
@@ -94,25 +87,23 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
     fb.height = shadow.height;
     fb.layers = 1;
     check(vkCreateFramebuffer(vk.device, &fb, nullptr, &shadowFramebuffer), "shadow framebuffer");
-    VkAttachmentDescription attachments[4]{};
-    for (int i = 0; i < 4; i++) {
+    VkAttachmentDescription attachments[3]{};
+    for (int i = 0; i < 3; i++) {
         auto &a = attachments[i];
-        a.format = i == 3 ? VK_FORMAT_D32_SFLOAT
-                          : (i == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT);
+        a.format = i == 2 ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
         a.samples = VK_SAMPLE_COUNT_1_BIT;
         a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        a.finalLayout = i == 3 ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        a.finalLayout = i == 2 ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
                                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
-    VkAttachmentReference cr[3] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-                                   {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-                                   {2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}},
-                          dr{3, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    sub.colorAttachmentCount = 3;
+    VkAttachmentReference cr[2] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+                                   {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}},
+                          dr{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    sub.colorAttachmentCount = 2;
     sub.pColorAttachments = cr;
     sub.pDepthStencilAttachment = &dr;
     VkSubpassDependency sourceDeps[2] = {
@@ -123,11 +114,11 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
         {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, 0}};
-    rp.attachmentCount = 4;
+    rp.attachmentCount = 3;
     rp.pAttachments = attachments;
     rp.pDependencies = sourceDeps;
     check(vkCreateRenderPass(vk.device, &rp, nullptr, &pass), "source render pass");
-    pipeline = vk.graphics(layout, pass, "source.vert", "source.frag", 3, true);
+    pipeline = vk.graphics(layout, pass, "source.vert", "source.frag", 2, true);
     shadowPipeline = vk.graphics(layout, shadowPass, "shadow.vert", "", 0, true);
     animatePipeline = vk.compute(layout, "source_animate.comp");
 }
@@ -138,15 +129,15 @@ void SourceRenderer::resize(uint32_t w, uint32_t h) {
     auto usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     color = vk.image(w, h, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    triangleIds = vk.image(w, h, VK_FORMAT_R32_UINT, usage);
-    depth = vk.image(w, h, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    depth = vk.image(w, h, VK_FORMAT_D32_SFLOAT,
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                      VK_IMAGE_ASPECT_DEPTH_BIT);
     for (int i = 0; i < 2; i++) {
         positions[i] = vk.image(w, h, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-        VkImageView views[] = {color.view, positions[i].view, triangleIds.view, depth.view};
+        VkImageView views[] = {color.view, positions[i].view, depth.view};
         VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         ci.renderPass = pass;
-        ci.attachmentCount = 4;
+        ci.attachmentCount = 3;
         ci.pAttachments = views;
         ci.width = w;
         ci.height = h;
@@ -190,12 +181,12 @@ void SourceRenderer::render(int target, const Parameters &parameters) {
     vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
     vkCmdDraw(vk.cmd, vertexCount, 1, 0, 0);
     vkCmdEndRenderPass(vk.cmd);
-    VkClearValue clears[4]{};
-    clears[3].depthStencil = {1, 0};
+    VkClearValue clears[3]{};
+    clears[2].depthStencil = {1, 0};
     bi.renderPass = pass;
     bi.framebuffer = framebuffers[target];
     bi.renderArea.extent = {width, height};
-    bi.clearValueCount = 4;
+    bi.clearValueCount = 3;
     bi.pClearValues = clears;
     vkCmdBeginRenderPass(vk.cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
     vk.viewport(0, 0, float(width), float(height));
@@ -212,7 +203,6 @@ void SourceRenderer::destroyTargets() {
     for (auto &i : positions)
         vk.destroy(i);
     vk.destroy(color);
-    vk.destroy(triangleIds);
     vk.destroy(depth);
 }
 SourceRenderer::~SourceRenderer() {

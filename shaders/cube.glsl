@@ -26,5 +26,11 @@ vec3 cubeVertex(out vec4 color, out vec3 faceDirection) {
     Voxel voxel = voxels[gl_InstanceIndex];
     color = voxel.rgba;
     faceDirection = n;
+    if (params.config.w == 1.0) {
+        // Construct shared corners from integer grid boundaries. Independent centre
+        // +/- half-width arithmetic can round adjoining faces to different positions.
+        vec3 cell = floor(voxel.centerSize.xyz / voxel.centerSize.w);
+        return (cell + .5 + .5 * (n + u * c.x + v * c.y)) * voxel.centerSize.w;
+    }
     return voxel.centerSize.xyz + voxel.centerSize.w * .5 * (n + u * c.x + v * c.y);
 }

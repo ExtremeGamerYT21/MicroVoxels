@@ -1,0 +1,32 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "counters.glsl"
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 11, std430) buffer Groups {
+    uint offsets[];
+};
+shared uint sums[256];
+void main() {
+    uint local = gl_LocalInvocationID.x, groups = uint(params.extent.z) / 256u;
+    uint chunk = (groups + 255u) / 256u, begin = local * chunk, end = min(begin + chunk, groups);
+    uint sum = 0u;
+    for (uint i = begin; i < end; i++)
+        sum += offsets[i];
+    sums[local] = sum;
+    barrier();
+    for (uint stride = 1u; stride < 256u; stride <<= 1u) {
+        uint previous = local >= stride ? sums[local - stride] : 0u;
+        barrier();
+        sums[local] += previous;
+        barrier();
+    }
+    uint prefix = local == 0u ? 0u : sums[local - 1u];
+    if (local == 255u)
+        instanceCount = sums[255];
+    for (uint i = begin; i < end; i++) {
+        uint count = offsets[i];
+        offsets[i] = prefix;
+        prefix += count;
+    }
+}

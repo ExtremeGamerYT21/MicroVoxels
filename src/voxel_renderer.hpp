@@ -15,7 +15,7 @@ class VoxelRenderer {
     ~VoxelRenderer();
     void resize();
     void begin(const Parameters &p);
-    void draw(const Parameters &p);
+    void draw(const Parameters &p, VkQueryPool queries);
     void end();
 };
 } // namespace micro

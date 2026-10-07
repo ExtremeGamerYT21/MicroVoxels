@@ -6,12 +6,9 @@ layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec3 worldNormal;
 layout(location = 2) in vec3 albedo;
 layout(location = 3) in float gloss;
-layout(location = 4) flat in uint triangleId;
 layout(location = 0) out vec4 shadedColor;
 layout(location = 1) out vec4 hitPosition;
-layout(location = 2) out uint visibleTriangle;
 void main() {
     shadedColor = vec4(shadeSurface(worldPosition, worldNormal, albedo, gloss), 1);
     hitPosition = vec4(worldPosition, 1);
-    visibleTriangle = triangleId;
 }
