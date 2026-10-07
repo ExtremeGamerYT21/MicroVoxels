@@ -1,0 +1,70 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "lattice.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D positions;
+layout(set = 0, binding = 7) uniform sampler2D colors;
+layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
+struct Slot {
+    uint owner;
+    uint r;
+    uint g;
+    uint b;
+    uint count;
+    uint nearest;
+};
+layout(set = 0, binding = 8, std430) buffer Hash {
+    Slot slots[];
+};
+layout(set = 0, binding = 9, std430) buffer Counters {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+    uint hits;
+    uint dropped;
+    uint rootDropped;
+    uint pad;
+    uint perLod[8];
+};
+ivec4 keyAt(uint id) {
+    ivec2 p = pixel(id - 1);
+    return voxelKey(texelFetch(positions, p, 0).xyz, imageLoad(lods, p).r);
+}
+float distanceAt(uint id) {
+    return distance(texelFetch(positions, pixel(id - 1), 0).xyz, frame.cameraTime.xyz);
+}
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, params.extent.xy)))
+        return;
+    vec4 hit = texelFetch(positions, p, 0);
+    if (hit.w == 0)
+        return;
+    atomicAdd(hits, 1);
+    uint id = uint(p.y * params.extent.x + p.x) + 1;
+    ivec4 key = voxelKey(hit.xyz, imageLoad(lods, p).r);
+    uint slot = hashKey(key) & uint(params.extent.z - 1);
+    for (uint probe = 0; probe < 96; probe++) {
+        uint s = (slot + probe) & uint(params.extent.z - 1);
+        uint owner = atomicCompSwap(slots[s].owner, 0, id);
+        if (owner != 0 && any(notEqual(keyAt(owner), key)))
+            continue;
+        uvec3 rgb = uvec3(round(clamp(texelFetch(colors, p, 0).rgb, 0, 1) * 1023));
+        atomicAdd(slots[s].r, rgb.r);
+        atomicAdd(slots[s].g, rgb.g);
+        atomicAdd(slots[s].b, rgb.b);
+        atomicAdd(slots[s].count, 1);
+        uint old = atomicAdd(slots[s].nearest, 0);
+        float d = distance(hit.xyz, frame.cameraTime.xyz);
+        while (old == 0 || d < distanceAt(old) || (d == distanceAt(old) && id < old)) {
+            uint found = atomicCompSwap(slots[s].nearest, old, id);
+            if (found == old)
+                break;
+            old = found;
+        }
+        return;
+    }
+    atomicAdd(dropped, 1);
+}

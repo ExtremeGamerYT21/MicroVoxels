@@ -1,0 +1,18 @@
+{
+  "device": "llvmpipe (LLVM 20.1.2, 256 bits)",
+  "source_backend": "Vulkan raster G-buffer",
+  "frames": 3,
+  "timed_frames_after_warmup": 1,
+  "triangles": 2860,
+  "samples": 307200,
+  "hits": 183544,
+  "unique_voxels": 61741,
+  "dropped_hits": 0,
+  "dropped_root_history_samples": 0,
+  "verified_frames": 3,
+  "freeze_checks": 0,
+  "validation_errors": 0,
+  "timestamp_supported": true,
+  "voxels_per_lod": [0, 32428, 28498, 815, 0],
+  "average_gpu_timings": {"source_and_shadow_ms": 6.44108, "lod_and_clear_ms": 10.9822, "hash_ms": 4.12624, "compact_ms": 0.121645, "final_render_ms": 94.2867, "hud_ms": 0.176835}
+}

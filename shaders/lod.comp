@@ -1,0 +1,73 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "lattice.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1) uniform sampler2D positions;
+layout(set = 0, binding = 2) uniform sampler2D previousPositions;
+layout(set = 0, binding = 3) uniform usampler2D previousLods;
+layout(set = 0, binding = 4, r32ui) uniform writeonly uimage2D currentLods;
+layout(set = 0, binding = 5, std430) buffer CurrentRoots {
+    uint currentRoots[];
+};
+layout(set = 0, binding = 6, std430) readonly buffer PreviousRoots {
+    uint previousRoots[];
+};
+layout(set = 0, binding = 9, std430) buffer Counters {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+    uint hits;
+    uint dropped;
+    uint rootDropped;
+    uint pad;
+    uint perLod[8];
+};
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, params.extent.xy)))
+        return;
+    vec4 hit = texelFetch(positions, p, 0);
+    if (hit.w == 0) {
+        imageStore(currentLods, p, uvec4(0));
+        return;
+    }
+    ivec3 root = rootCell(hit.xyz);
+    float d = distance(rootCenter(root), frame.cameraTime.xyz);
+    int old = -1;
+    uint slot = hashKey(ivec4(root, 0)) & (ROOT_CAPACITY - 1);
+    for (uint i = 0; i < 64; i++) {
+        uint id = previousRoots[(slot + i) & (ROOT_CAPACITY - 1)];
+        if (id == 0)
+            break;
+        ivec2 q = pixel(id - 1);
+        if (all(equal(rootCell(texelFetch(previousPositions, q, 0).xyz), root))) {
+            old = int(texelFetch(previousLods, q, 0).r);
+            break;
+        }
+    }
+    int lod = old;
+    if (lod < 0)
+        lod =
+            clamp(int(floor(log2(max(d / params.config.y, 1.0)))) + (d >= params.config.y ? 1 : 0),
+                  0, params.flags.x - 1);
+    else {
+        lod = clamp(lod, 0, params.flags.x - 1);
+        while (lod > 0 && d < params.config.y * exp2(float(lod - 1)) * (1 - params.config.z))
+            lod--;
+        while (lod < params.flags.x - 1 &&
+               d > params.config.y * exp2(float(lod)) * (1 + params.config.z))
+            lod++;
+    }
+    imageStore(currentLods, p, uvec4(lod));
+    uint id = uint(p.y * params.extent.x + p.x) + 1;
+    for (uint i = 0; i < 64; i++) {
+        uint s = (slot + i) & (ROOT_CAPACITY - 1);
+        uint owner = atomicCompSwap(currentRoots[s], 0, id);
+        if (owner == 0 ||
+            all(equal(rootCell(texelFetch(positions, pixel(owner - 1), 0).xyz), root)))
+            return;
+    }
+    atomicAdd(rootDropped, 1);
+}

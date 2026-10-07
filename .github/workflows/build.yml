@@ -1,0 +1,30 @@
+name: Build and verify
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  linux-vulkan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libvulkan-dev libglfw3-dev libglm-dev glslang-tools mesa-vulkan-drivers vulkan-validationlayers xvfb
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          for shader in build/shaders/*.spv; do spirv-val --target-env vulkan1.1 "$shader"; done
+      - name: Grid tests
+        run: ctest --test-dir build --output-on-failure
+      - name: GPU reference and freeze checks on software Vulkan
+        run: |
+          export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/ci.json
+          xvfb-run -a ./build/microvoxels --hidden --validation --verify --supersampling --frames 3 --width 320 --height 240 --no-ui --report captures/supersampling.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports
+          path: captures/*.json

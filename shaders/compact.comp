@@ -1,0 +1,53 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "lattice.glsl"
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 1) uniform sampler2D positions;
+layout(set = 0, binding = 7) uniform sampler2D colors;
+layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
+struct Slot {
+    uint owner;
+    uint r;
+    uint g;
+    uint b;
+    uint count;
+    uint nearest;
+};
+layout(set = 0, binding = 8, std430) readonly buffer Hash {
+    Slot slots[];
+};
+layout(set = 0, binding = 9, std430) buffer Counters {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+    uint hits;
+    uint dropped;
+    uint rootDropped;
+    uint pad;
+    uint perLod[8];
+};
+struct Voxel {
+    vec4 centerSize;
+    vec4 rgba;
+};
+layout(set = 0, binding = 10, std430) writeonly buffer Instances {
+    Voxel voxels[];
+};
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    if (s >= uint(params.extent.z) || slots[s].owner == 0)
+        return;
+    ivec2 p = pixel(slots[s].owner - 1);
+    uint lod = imageLoad(lods, p).r;
+    ivec4 key = voxelKey(texelFetch(positions, p, 0).xyz, lod);
+    float h = params.config.x * exp2(float(lod));
+    uint idx = atomicAdd(instanceCount, 1); // max instances == hash capacity: cannot overflow
+    vec3 rgb = params.flags.y == 1
+                   ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
+                   : texelFetch(colors, pixel(slots[s].nearest - 1), 0).rgb;
+    voxels[idx].centerSize = vec4((vec3(key.xyz) + .5) * h, h * params.config.w);
+    voxels[idx].rgba = vec4(rgb, 1);
+    atomicAdd(perLod[lod], 1);
+}
