@@ -1,4 +1,5 @@
 #include "hud.hpp"
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <iomanip>

@@ -28,3 +28,22 @@ jobs:
         with:
           name: verification-reports
           path: captures/*.json
+  windows-msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        shell: pwsh
+        run: '& "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install glfw3:x64-windows glm:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows "glslang[tools]:x64-windows"'
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          "-DVulkan_INCLUDE_DIR=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/include"
+          "-DVulkan_LIBRARY=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/vulkan-1.lib"
+          "-DVulkan_GLSLANG_VALIDATOR_EXECUTABLE=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/tools/glslang/glslangValidator.exe"
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Grid tests
+        run: ctest --test-dir build -C Release --output-on-failure
