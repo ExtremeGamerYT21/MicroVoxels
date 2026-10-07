@@ -14,27 +14,18 @@ layout(set = 0, binding = 8, std430) readonly buffer Hash {
     Slot slots[];
 };
 #include "instance_output.glsl"
-layout(set = 0, binding = 11, std430) readonly buffer Groups {
-    uint offsets[];
+layout(set = 0, binding = 12, std430) readonly buffer UniqueSlots {
+    uint uniqueSlots[];
 };
-shared uint scan[256];
 void main() {
-    uint s = gl_GlobalInvocationID.x, local = gl_LocalInvocationID.x;
-    bool valid = s < uint(params.extent.z) && slots[s].owner != 0u;
-    scan[local] = valid ? 1u : 0u;
-    barrier();
-    for (uint stride = 1u; stride < 256u; stride <<= 1u) {
-        uint previous = local >= stride ? scan[local - stride] : 0u;
-        barrier();
-        scan[local] += previous;
-        barrier();
-    }
-    if (!valid)
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= instanceCount)
         return;
+    uint s = uniqueSlots[idx];
     ivec2 p = ownerPixel(slots[s].owner);
     ivec4 key = voxelKey(sourcePosition(p).xyz, imageLoad(lods, p).r);
     key.xyz += ownerOffset(slots[s].owner);
-    uint lod = uint(key.w), idx = offsets[gl_WorkGroupID.x] + scan[local] - 1u;
+    uint lod = uint(key.w);
     vec3 rgb = params.flags.y == 1
                    ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
                    : texelFetch(colors, ownerPixel(slots[s].nearest), 0).rgb;

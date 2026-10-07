@@ -1,21 +1,23 @@
 #include "visual_voxelizer.hpp"
+#include <cstddef>
 namespace micro {
-VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform)
-    : vk(context), frame(uniform) {
+VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform, bool packed, bool verify)
+    : vk(context), frame(uniform), verifyDepth(verify), instanceStride(packed ? 16 : 32) {
     slots = vk.buffer(Capacity * 24ull,
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     counters = vk.buffer(sizeof(Counters),
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                              VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    instances = vk.buffer(Capacity * sizeof(Voxel),
+    instances = vk.buffer(Capacity * uint64_t(instanceStride),
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     for (auto &r : roots)
         r = vk.buffer(RootCapacity * 8ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    uniqueSlots = vk.buffer(Capacity * 4ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     compactGroups = vk.buffer(Capacity / 256 * 4ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (uint32_t i = 0; i <= 11; i++) {
+    for (uint32_t i = 0; i <= 13; i++) {
         VkDescriptorType t = i == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                     : (i == 4 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                               : ((i == 1 || i == 2 || i == 3 || i == 7)
@@ -34,11 +36,20 @@ VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform)
     lodPipeline = vk.compute(layout, "lod.comp");
     resolveLodPipeline = vk.compute(layout, "lod_resolve.comp");
     hashPipeline = vk.compute(layout, "voxelize.comp");
+    localHashPipeline = vk.compute(layout, "voxelize_local.comp");
     compactPipeline = vk.compute(layout, "compact.comp");
     compactCountsPipeline = vk.compute(layout, "compact_counts.comp");
     compactPrefixPipeline = vk.compute(layout, "compact_prefix.comp");
+    resolveUniquePipeline = vk.compute(layout, "resolve_unique.comp");
+    clearTouchedPipeline = vk.compute(layout, "clear_touched.comp");
 }
 void VisualVoxelizer::resize(const SurfaceSamples &source) {
+    vk.destroy(reconstructedSamples);
+    // Verification only: compare quantization against the exact GPU reconstruction,
+    // then independently check it against CPU inverse projection and source depth.
+    reconstructedSamples =
+        vk.buffer(verifyDepth ? source.width * uint64_t(source.height) * 16 : 16,
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     for (auto &l : lods) {
         vk.destroy(l);
         l = vk.image(source.width, source.height, VK_FORMAT_R32_UINT,
@@ -46,9 +57,9 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     }
     for (int i = 0; i < 2; i++) {
-        VkDescriptorBufferInfo bufferInfo[12]{};
-        VkDescriptorImageInfo imageInfo[12]{};
-        VkWriteDescriptorSet writes[12]{};
+        VkDescriptorBufferInfo bufferInfo[14]{};
+        VkDescriptorImageInfo imageInfo[14]{};
+        VkWriteDescriptorSet writes[14]{};
         bufferInfo[0] = {frame.handle, 0, sizeof(Frame)};
         bufferInfo[5] = {roots[i].handle, 0, roots[i].size};
         bufferInfo[6] = {roots[1 - i].handle, 0, roots[1 - i].size};
@@ -56,20 +67,24 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
         bufferInfo[9] = {counters.handle, 0, counters.size};
         bufferInfo[10] = {instances.handle, 0, instances.size};
         bufferInfo[11] = {compactGroups.handle, 0, compactGroups.size};
+        bufferInfo[12] = {uniqueSlots.handle, 0, uniqueSlots.size};
+        bufferInfo[13] = {reconstructedSamples.handle, 0, reconstructedSamples.size};
         imageInfo[1] = {vk.sampler, source.positions[i].view,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                        (source.depthOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)};
         imageInfo[2] = {vk.sampler, source.positions[1 - i].view,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                        (source.depthOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)};
         imageInfo[3] = {vk.sampler, lods[1 - i].view, VK_IMAGE_LAYOUT_GENERAL};
         imageInfo[4] = {VK_NULL_HANDLE, lods[i].view, VK_IMAGE_LAYOUT_GENERAL};
         imageInfo[7] = {vk.sampler, source.color.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        for (uint32_t b = 0; b <= 11; b++) {
+        for (uint32_t b = 0; b <= 13; b++) {
             auto &w = writes[b];
             w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w.dstSet = sets[i];
             w.dstBinding = b;
             w.descriptorCount = 1;
-            if (b == 0 || b == 5 || b == 6 || (b >= 8 && b <= 11)) {
+            if (b == 0 || b == 5 || b == 6 || (b >= 8 && b <= 13)) {
                 w.descriptorType =
                     b == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 w.pBufferInfo = &bufferInfo[b];
@@ -79,7 +94,7 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
                 w.pImageInfo = &imageInfo[b];
             }
         }
-        vkUpdateDescriptorSets(vk.device, 12, writes, 0, nullptr);
+        vkUpdateDescriptorSets(vk.device, 14, writes, 0, nullptr);
     }
     vk.immediateBegin();
     for (auto &l : lods)
@@ -95,14 +110,37 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
     resetHistory = true;
 }
 void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
-    vk.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    cloudComputePasses = p.optimization.x ? 6 : 4;
+    cloudTouchedClear = (p.optimization.z & 1) != 0 && tableInitialized;
+    vk.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-               VK_ACCESS_TRANSFER_WRITE_BIT);
-    vkCmdFillBuffer(vk.cmd, slots.handle, 0, slots.size, 0);
+               VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+                   VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    if (cloudTouchedClear) {
+        cloudComputePasses++;
+        vkCmdBindDescriptorSets(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1,
+                                &sets[current], 0, nullptr);
+        vkCmdPushConstants(vk.cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof(p), &p);
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, clearTouchedPipeline);
+        vkCmdDispatchIndirect(vk.cmd, counters.handle, offsetof(Counters, dispatchX));
+        vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+                       VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    } else {
+        vkCmdFillBuffer(vk.cmd, slots.handle, 0, slots.size, 0);
+    }
+    if (q)
+        vk.timestamp(q, 13, (p.footprint.w & 4) != 0);
+    tableInitialized = true;
     // Initialize the whole indirect command and statistics in one transfer. A fill
     // followed by an unsynchronized partial update can clear vertexCount again.
     Counters initial{};
     initial.vertexCount = 36;
+    initial.dispatchY = initial.dispatchZ = 1;
     vkCmdUpdateBuffer(vk.cmd, counters.handle, 0, sizeof(initial), &initial);
     vkCmdFillBuffer(vk.cmd, roots[current].handle, 0, roots[current].size, 0);
     if (resetHistory) {
@@ -112,6 +150,8 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
     vk.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_TRANSFER_WRITE_BIT,
                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    if (q)
+        vk.timestamp(q, 9, (p.footprint.w & 4) != 0);
     vkCmdBindDescriptorSets(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &sets[current], 0,
                             nullptr);
     vkCmdPushConstants(vk.cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof(p), &p);
@@ -119,28 +159,48 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
     vkCmdDispatch(vk.cmd, (p.extent.x + 7) / 8, (p.extent.y + 7) / 8, 1);
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    if (q)
+        vk.timestamp(q, 10, (p.footprint.w & 4) != 0);
     vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolveLodPipeline);
     vkCmdDispatch(vk.cmd, (p.extent.x + 7) / 8, (p.extent.y + 7) / 8, 1);
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     if (q)
-        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 2);
-    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hashPipeline);
+        vk.timestamp(q, 2, (p.footprint.w & 4) != 0);
+    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      p.optimization.w ? localHashPipeline : hashPipeline);
     vkCmdDispatch(vk.cmd, (p.extent.x + 7) / 8, (p.extent.y + 7) / 8, 1);
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     if (q)
-        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 3);
-    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactCountsPipeline);
-    vkCmdDispatch(vk.cmd, Capacity / 256, 1, 1);
-    vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-               VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactPrefixPipeline);
-    vkCmdDispatch(vk.cmd, 1, 1, 1);
-    vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-               VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactPipeline);
-    vkCmdDispatch(vk.cmd, Capacity / 256, 1, 1);
+        vk.timestamp(q, 3, (p.footprint.w & 4) != 0);
+    if (p.optimization.x) {
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactCountsPipeline);
+        vkCmdDispatch(vk.cmd, Capacity / 256, 1, 1);
+        vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        if (q)
+            vk.timestamp(q, 11, (p.footprint.w & 4) != 0);
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactPrefixPipeline);
+        vkCmdDispatch(vk.cmd, 1, 1, 1);
+        vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        if (q)
+            vk.timestamp(q, 12, (p.footprint.w & 4) != 0);
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactPipeline);
+        vkCmdDispatch(vk.cmd, Capacity / 256, 1, 1);
+    } else {
+        if (q) {
+            vk.timestamp(q, 11, (p.footprint.w & 4) != 0);
+            vk.timestamp(q, 12, (p.footprint.w & 4) != 0);
+        }
+        vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolveUniquePipeline);
+        vkCmdDispatchIndirect(vk.cmd, counters.handle, offsetof(Counters, dispatchX));
+    }
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -148,8 +208,10 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
                VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
                    VK_ACCESS_TRANSFER_READ_BIT);
     if (q)
-        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 4);
+        vk.timestamp(q, 4, (p.footprint.w & 4) != 0);
     cloudReady = true;
+    cloudBase = p.config.x;
+    cloudSplat = p.config.w;
 }
 VisualVoxelizer::~VisualVoxelizer() {
     for (auto &i : lods)
@@ -160,8 +222,11 @@ VisualVoxelizer::~VisualVoxelizer() {
     vk.destroy(counters);
     vk.destroy(instances);
     vk.destroy(compactGroups);
-    for (auto p : {lodPipeline, resolveLodPipeline, hashPipeline, compactPipeline,
-                   compactCountsPipeline, compactPrefixPipeline})
+    vk.destroy(uniqueSlots);
+    vk.destroy(reconstructedSamples);
+    for (auto p : {lodPipeline, resolveLodPipeline, hashPipeline, localHashPipeline,
+                   compactPipeline, compactCountsPipeline, compactPrefixPipeline,
+                   resolveUniquePipeline, clearTouchedPipeline})
         vkDestroyPipeline(vk.device, p, nullptr);
     vkDestroyPipelineLayout(vk.device, layout, nullptr);
     vkFreeDescriptorSets(vk.device, vk.descriptorPool, 2, sets.data());

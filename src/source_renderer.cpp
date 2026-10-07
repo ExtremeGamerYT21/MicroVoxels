@@ -2,8 +2,9 @@
 #include <algorithm>
 #include <cstring>
 namespace micro {
-SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world, Buffer &frame)
-    : vk(context) {
+SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world, Buffer &frame,
+                               bool reconstruct)
+    : vk(context), depthOnly(reconstruct) {
     vertexCount = uint32_t(world.vertices.size());
     originalVertices =
         vk.buffer(vertexCount * sizeof(SourceVertex), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
@@ -87,23 +88,24 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
     fb.height = shadow.height;
     fb.layers = 1;
     check(vkCreateFramebuffer(vk.device, &fb, nullptr, &shadowFramebuffer), "shadow framebuffer");
+    uint32_t colorCount = depthOnly ? 1u : 2u, attachmentCount = colorCount + 1;
     VkAttachmentDescription attachments[3]{};
-    for (int i = 0; i < 3; i++) {
+    for (uint32_t i = 0; i < attachmentCount; i++) {
         auto &a = attachments[i];
-        a.format = i == 2 ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
+        a.format = i == colorCount ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
         a.samples = VK_SAMPLE_COUNT_1_BIT;
         a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        a.finalLayout = i == 2 ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        a.finalLayout = i == colorCount ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
     VkAttachmentReference cr[2] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                                    {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}},
-                          dr{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    sub.colorAttachmentCount = 2;
+                          dr{colorCount, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    sub.colorAttachmentCount = colorCount;
     sub.pColorAttachments = cr;
     sub.pDepthStencilAttachment = &dr;
     VkSubpassDependency sourceDeps[2] = {
@@ -111,14 +113,17 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, 0},
-        {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        {0, VK_SUBPASS_EXTERNAL,
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, 0}};
-    rp.attachmentCount = 3;
+         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+         VK_ACCESS_SHADER_READ_BIT, 0}};
+    rp.attachmentCount = attachmentCount;
     rp.pAttachments = attachments;
     rp.pDependencies = sourceDeps;
     check(vkCreateRenderPass(vk.device, &rp, nullptr, &pass), "source render pass");
-    pipeline = vk.graphics(layout, pass, "source.vert", "source.frag", 2, true);
+    pipeline = vk.graphics(layout, pass, "source.vert",
+                           depthOnly ? "source_depth.frag" : "source.frag", int(colorCount), true);
     shadowPipeline = vk.graphics(layout, shadowPass, "shadow.vert", "", 0, true);
     animatePipeline = vk.compute(layout, "source_animate.comp");
 }
@@ -129,15 +134,19 @@ void SourceRenderer::resize(uint32_t w, uint32_t h) {
     auto usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     color = vk.image(w, h, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    depth = vk.image(w, h, VK_FORMAT_D32_SFLOAT,
-                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                     VK_IMAGE_ASPECT_DEPTH_BIT);
+    for (int i = 0; i < (depthOnly ? 2 : 1); i++)
+        depths[i] = vk.image(w, h, VK_FORMAT_D32_SFLOAT,
+                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                             VK_IMAGE_ASPECT_DEPTH_BIT);
     for (int i = 0; i < 2; i++) {
-        positions[i] = vk.image(w, h, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-        VkImageView views[] = {color.view, positions[i].view, depth.view};
+        if (!depthOnly)
+            positions[i] = vk.image(w, h, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+        VkImageView views[3] = {color.view, depthOnly ? depths[i].view : positions[i].view,
+                                depths[0].view};
         VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         ci.renderPass = pass;
-        ci.attachmentCount = 3;
+        ci.attachmentCount = depthOnly ? 2 : 3;
         ci.pAttachments = views;
         ci.width = w;
         ci.height = h;
@@ -147,8 +156,10 @@ void SourceRenderer::resize(uint32_t w, uint32_t h) {
     // Both history positions start valid for sampling; empty roots guarantee they are never
     // interpreted as hits.
     vk.immediateBegin();
-    for (auto &p : positions) {
-        vk.imageBarrier(p, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    for (auto &p : (depthOnly ? depths : positions)) {
+        vk.imageBarrier(p, VK_IMAGE_LAYOUT_UNDEFINED,
+                        depthOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                         VK_ACCESS_SHADER_READ_BIT);
     }
@@ -182,11 +193,11 @@ void SourceRenderer::render(int target, const Parameters &parameters) {
     vkCmdDraw(vk.cmd, vertexCount, 1, 0, 0);
     vkCmdEndRenderPass(vk.cmd);
     VkClearValue clears[3]{};
-    clears[2].depthStencil = {1, 0};
+    clears[depthOnly ? 1 : 2].depthStencil = {1, 0};
     bi.renderPass = pass;
     bi.framebuffer = framebuffers[target];
     bi.renderArea.extent = {width, height};
-    bi.clearValueCount = 3;
+    bi.clearValueCount = depthOnly ? 2 : 3;
     bi.pClearValues = clears;
     vkCmdBeginRenderPass(vk.cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
     vk.viewport(0, 0, float(width), float(height));
@@ -203,7 +214,8 @@ void SourceRenderer::destroyTargets() {
     for (auto &i : positions)
         vk.destroy(i);
     vk.destroy(color);
-    vk.destroy(depth);
+    for (auto &d : depths)
+        vk.destroy(d);
 }
 SourceRenderer::~SourceRenderer() {
     destroyTargets();

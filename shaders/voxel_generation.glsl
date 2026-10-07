@@ -1,0 +1,188 @@
+#include "common.glsl"
+#include "counters.glsl"
+#include "lattice.glsl"
+#define SURFACE_TILE
+#include "surface_footprint.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 7) uniform sampler2D colors;
+layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
+layout(set = 0, binding = 5, std430) readonly buffer CurrentRoots {
+    Root currentRoots[];
+};
+struct Slot {
+    uint owner, r, g, b, count, nearest;
+};
+layout(set = 0, binding = 8, std430) buffer Hash {
+    Slot slots[];
+};
+layout(set = 0, binding = 12, std430) buffer UniqueSlots {
+    uint uniqueSlots[];
+};
+layout(set = 0, binding = 13, std430) writeonly buffer ReconstructionCheck {
+    vec4 reconstructedSamples[];
+};
+ivec4 keyAt(uint id) {
+    ivec2 p = ownerPixel(id);
+    ivec4 key = voxelKey(sourcePosition(p).xyz, imageLoad(lods, p).r);
+    key.xyz += ownerOffset(id);
+    return key;
+}
+float distanceAt(uint id) {
+    return distance(sourcePosition(ownerPixel(id)).xyz, frame.cameraTime.xyz);
+}
+bool compatibleRegion(ivec4 key, ivec3 own) {
+    if (params.flags.x == 1)
+        return true; // every region has this same level, including unsampled cells
+    ivec3 root = ivec3(floor(vec3(key.xyz) / exp2(float(params.flags.x - 1 - key.w))));
+    if (all(equal(root, own)))
+        return true;
+    uint slot = hashKey(ivec4(root, 0)) & (ROOT_CAPACITY - 1u);
+    for (uint i = 0u; i < 64u; i++) {
+        Root entry = currentRoots[(slot + i) & (ROOT_CAPACITY - 1u)];
+        if (entry.owner == 0u)
+            return false;
+        if (all(equal(rootCell(sourcePosition(pixel(entry.owner - 1u)).xyz), root)))
+            return entry.lod == uint(key.w);
+    }
+    return false;
+}
+void emitGlobal(uint id, ivec4 key, uvec3 rgb, uint contributors, uint nearest, float depth) {
+    atomicAdd(globalHashAttempts, 1u);
+    uint slot = hashKey(key) & uint(params.extent.z - 1);
+    for (uint probe = 0u; probe < 96u; probe++) {
+        uint s = (slot + probe) & uint(params.extent.z - 1);
+        uint owner = atomicCompSwap(slots[s].owner, 0u, id);
+        if (owner != 0u && any(notEqual(keyAt(owner), key)))
+            continue;
+        if (owner == 0u && (params.optimization.x == 0 || (params.optimization.z & 2) != 0)) {
+            uint index = atomicAdd(instanceCount, 1u);
+            uniqueSlots[index] = s;
+            atomicMax(dispatchX, index / 256u + 1u);
+        }
+        atomicAdd(hashProbes, probe + 1u);
+        atomicAdd(slots[s].r, rgb.r);
+        atomicAdd(slots[s].g, rgb.g);
+        atomicAdd(slots[s].b, rgb.b);
+        atomicAdd(slots[s].count, contributors);
+        if (params.flags.y == 0) {
+            uint old = atomicAdd(slots[s].nearest, 0u);
+            while (old == 0u || depth < distanceAt(old) ||
+                   (depth == distanceAt(old) && nearest < old)) {
+                uint found = atomicCompSwap(slots[s].nearest, old, nearest);
+                if (found == old)
+                    break;
+                old = found;
+            }
+        }
+        return;
+    }
+    atomicAdd(hashProbes, 96u);
+    atomicAdd(dropped, contributors);
+}
+#ifdef LOCAL_DEDUP
+// Keys use the same immutable owner sample as the global table. Publishing one
+// owner word avoids spinning on partially initialized keys, including within a wave.
+shared Slot localSlots[256];
+#endif
+void emitCell(ivec2 p, ivec3 offset, ivec4 key, uvec3 rgb, float depth) {
+    atomicAdd(candidateWrites, 1u);
+    if (params.optimization.y != 0 &&
+        (any(lessThan(key.xyz, ivec3(-524288))) || any(greaterThan(key.xyz, ivec3(524287))))) {
+        atomicAdd(dropped, 1u);
+        return;
+    }
+    uint id = ownerId(p, offset);
+#ifdef LOCAL_DEDUP
+    uint slot = hashKey(key) & 255u;
+    for (uint probe = 0u; probe < 16u; probe++) {
+        uint s = (slot + probe) & 255u;
+        uint owner = atomicCompSwap(localSlots[s].owner, 0u, id);
+        if (owner != 0u && any(notEqual(keyAt(owner), key)))
+            continue;
+        atomicAdd(localSlots[s].r, rgb.r);
+        atomicAdd(localSlots[s].g, rgb.g);
+        atomicAdd(localSlots[s].b, rgb.b);
+        atomicAdd(localSlots[s].count, 1u);
+        if (params.flags.y == 0) {
+            uint old = atomicAdd(localSlots[s].nearest, 0u);
+            while (old == 0u || depth < distanceAt(old) || (depth == distanceAt(old) && id < old)) {
+                uint found = atomicCompSwap(localSlots[s].nearest, old, id);
+                if (found == old)
+                    break;
+                old = found;
+            }
+        }
+        return;
+    }
+    // A full local table falls back to direct insertion; no coverage is discarded.
+    atomicAdd(localFallbacks, 1u);
+#endif
+    emitGlobal(id, key, rgb, 1u, id, depth);
+}
+void processPixel() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, params.extent.xy)))
+        return;
+    vec4 hit = sourcePosition(p);
+    if ((params.footprint.w & 2) != 0)
+        reconstructedSamples[uint(p.y * params.extent.x + p.x)] = hit;
+    if (hit.w == 0)
+        return;
+    atomicAdd(hits, 1u);
+    uint lod = imageLoad(lods, p).r;
+    float h = params.config.x * exp2(float(lod));
+    ivec4 key = voxelKey(hit.xyz, lod);
+    uvec3 rgb = uvec3(round(clamp(texelFetch(colors, p, 0).rgb, 0, 1) * 1023));
+    float depth = distance(hit.xyz, frame.cameraTime.xyz);
+    emitCell(p, ivec3(0), key, rgb, depth); // always preserve the original point splat
+    uint emitted = 1u;
+    Footprint f = boundedFootprint(p, hit.xyz, h);
+    vec3 extent = .5 * (abs(f.dx) + abs(f.dy));
+    float span = max(extent.x, max(extent.y, extent.z)) / h;
+    atomicMax(maxFootprintExtent, uint(round(span * 1024)));
+    atomicAdd(rejectedNeighbors, f.rejected);
+    int radius = params.footprint.x;
+    // Floor ownership avoids creating a second layer for a zero-width grid-aligned axis.
+    ivec3 begin = max(ivec3(floor((hit.xyz - extent) / h)) - key.xyz, ivec3(-radius));
+    ivec3 end = min(ivec3(floor((hit.xyz + extent) / h)) - key.xyz, ivec3(radius));
+    ivec3 own = rootCell(hit.xyz);
+    for (int z = begin.z; z <= end.z; z++)
+        for (int y = begin.y; y <= end.y; y++)
+            for (int x = begin.x; x <= end.x; x++) {
+                ivec3 offset = ivec3(x, y, z);
+                if (all(equal(offset, ivec3(0))))
+                    continue;
+                ivec4 other = key + ivec4(offset, 0);
+                if (!compatibleRegion(other, own) ||
+                    !footprintBox(hit.xyz, f, (vec3(other.xyz) + .5) * h, h))
+                    continue;
+                if (emitted >= uint(params.footprint.y)) {
+                    f.clamped = true;
+                    continue;
+                }
+                emitCell(p, offset, other, rgb, depth);
+                emitted++;
+            }
+    atomicMax(maxFootprintCells, emitted);
+    if (f.clamped)
+        atomicAdd(clampedFootprints, 1u);
+}
+
+void main() {
+    prepareSurfaceTile();
+#ifdef LOCAL_DEDUP
+    for (uint i = gl_LocalInvocationIndex; i < 256u; i += 64u)
+        localSlots[i] = Slot(0u, 0u, 0u, 0u, 0u, 0u);
+    barrier();
+#endif
+    processPixel();
+#ifdef LOCAL_DEDUP
+    barrier();
+    for (uint i = gl_LocalInvocationIndex; i < 256u; i += 64u) {
+        Slot s = localSlots[i];
+        if (s.owner != 0u)
+            emitGlobal(s.owner, keyAt(s.owner), uvec3(s.r, s.g, s.b), s.count, s.nearest,
+                       params.flags.y == 0 ? distanceAt(s.nearest) : 0.0);
+    }
+#endif
+}

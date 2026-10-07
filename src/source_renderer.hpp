@@ -18,16 +18,22 @@ class SourceRenderer {
     void destroyTargets();
 
   public:
-    Image color, depth, shadow;
+    Image color, shadow;
+    std::array<Image, 2> depths;
+    bool depthOnly;
     Buffer animatedVertices;
     std::array<Image, 2> positions;
     uint32_t width{}, height{}, vertexCount{};
-    SourceRenderer(VulkanContext &vk, const SourceWorld &world, Buffer &frame);
+    SourceRenderer(VulkanContext &vk, const SourceWorld &world, Buffer &frame,
+                   bool depthOnly = false);
     ~SourceRenderer();
     void resize(uint32_t w, uint32_t h);
     void render(int target, const Parameters &parameters);
+    Image &depthFor(int target) {
+        return depths[depthOnly ? target : 0];
+    }
     SurfaceSamples samples() {
-        return {color, positions, width, height};
+        return {color, depthOnly ? depths : positions, depthOnly, width, height};
     }
 };
 } // namespace micro

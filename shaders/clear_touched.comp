@@ -1,0 +1,20 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "counters.glsl"
+layout(local_size_x = 256) in;
+struct Slot {
+    uint owner, r, g, b, count, nearest;
+};
+layout(set = 0, binding = 8, std430) buffer Hash {
+    Slot slots[];
+};
+layout(set = 0, binding = 12, std430) readonly buffer UniqueSlots {
+    uint uniqueSlots[];
+};
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= instanceCount)
+        return;
+    slots[uniqueSlots[index]] = Slot(0u, 0u, 0u, 0u, 0u, 0u);
+}

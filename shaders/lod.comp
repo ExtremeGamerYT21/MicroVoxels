@@ -4,8 +4,8 @@
 #include "lattice.glsl"
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "counters.glsl"
+#define SURFACE_TILE
 #include "surface_footprint.glsl"
-layout(set = 0, binding = 2) uniform sampler2D previousPositions;
 layout(set = 0, binding = 5, std430) buffer CurrentRoots {
     Root currentRoots[];
 };
@@ -13,10 +13,11 @@ layout(set = 0, binding = 6, std430) readonly buffer PreviousRoots {
     Root previousRoots[];
 };
 void main() {
+    prepareSurfaceTile();
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, params.extent.xy)))
         return;
-    vec4 hit = texelFetch(positions, p, 0);
+    vec4 hit = sourcePosition(p);
     if (hit.w == 0)
         return;
     ivec3 root = rootCell(hit.xyz);
@@ -29,7 +30,7 @@ void main() {
         if (id == 0)
             break;
         ivec2 q = pixel(id - 1);
-        if (all(equal(rootCell(texelFetch(previousPositions, q, 0).xyz), root))) {
+        if (all(equal(rootCell(previousPosition(q).xyz), root))) {
             old = int(previous.lod);
             break;
         }
@@ -45,8 +46,7 @@ void main() {
     for (uint i = 0; i < 64; i++) {
         uint s = (slot + i) & (ROOT_CAPACITY - 1);
         uint owner = atomicCompSwap(currentRoots[s].owner, 0, id);
-        if (owner == 0 ||
-            all(equal(rootCell(texelFetch(positions, pixel(owner - 1), 0).xyz), root))) {
+        if (owner == 0 || all(equal(rootCell(sourcePosition(pixel(owner - 1)).xyz), root))) {
             atomicMax(currentRoots[s].lod, uint(lod));
             return;
         }

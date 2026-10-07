@@ -1,5 +1,7 @@
 # Raster-buffer footprint comparison
 
+These are historical measurements at `f3f37fffcf5299a10e82ba445fc9582407ab3d8f`. The footprint behavior and coverage results remain current; ordered compaction and the old per-stage timing attribution are superseded by [STREAMLINING.md](STREAMLINING.md).
+
 The voxel generator now consumes visible cached XYZ and final RGB only. The source renderer owns depth visibility, animation, materials, normals, lights and shadows. There is no post-process raycast and no source triangle topology in generation. Final cubes output stored RGB directly.
 
 ## Reconstruction and stability

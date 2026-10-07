@@ -40,7 +40,7 @@ Press **T** to compare this with **point mode**, where one valid source sample e
 .\build-windows\Release\microvoxels.exe --levels 1 --no-adaptive-lod
 ```
 
-`--footprint-radius 0` produces point-sized footprints. `--sample-occupancy` remains an alias for point mode. Normal cubes use exact cell-sized geometry. Shared corners come from integer grid boundaries. Ordered GPU compaction also fixes the observed stationary draw-order flicker at equal-depth faces.
+`--footprint-radius 0` produces point-sized footprints. `--sample-occupancy` remains an alias for point mode. Normal cubes use exact cell-sized geometry, with shared corners derived from integer grid boundaries. Stationary RGB screenshots and frozen clouds are checked in CI.
 
 | Control | Action |
 |---|---|
@@ -65,19 +65,23 @@ Press **T** to compare this with **point mode**, where one valid source sample e
 
 Defaults: 10 mm base pitch, 4 m first distance boundary, five levels, ±10% LOD hysteresis, footprint splats and projected-size LOD enabled. Grid origin stays at world `(0,0,0)`.
 
-The HUD shows source resolution/samples, valid hits, candidate writes, unique cubes, writes per hit, maximum footprint extent/count, clamped/rejected footprints, frame time, generation time and cube draw time.
+The HUD shows source resolution/samples, valid hits, candidate writes, unique cubes, writes per hit, maximum footprint extent/count, clamped/rejected footprints, frame/generation/draw times, global hash attempts, table load, contributors per cell and instance memory. Use `--profile-stages` to isolate pass timings; ordinary timestamps allow pipeline overlap.
 
 Freeze and move around to inspect the sampled shell. Newly exposed surfaces are absent until regeneration. Stored RGB retains its original view-dependent source shading. If both panes are empty with `HITS 0`, press **R**. Mouse capture/focus and finite camera-pose guards remain in place.
 
 ## Pipeline
 
-1. **SourceRenderer** renders opaque visibility, depth, cached world XYZ and final shaded RGB.
-2. **SurfaceSamples** exposes only visible world positions and final RGB, with one previous position image for LOD history.
-3. **VisualVoxelizer** selects world-region LOD, estimates bounded screen-derived footprints, quantizes cells and reduces RGB using exact keys.
-4. GPU count/prefix/compact passes emit instances in hash-slot order and write the indirect draw count.
-5. **VoxelRenderer** draws centre/size + RGBA instances with stored RGB directly.
+1. **SourceRenderer** renders source depth, final RGB and cached XYZ. A benchmark option produces depth + RGB alone.
+2. **VisualVoxelizer** clears previous occupied slots, resets counters/root metadata, and runs the existing world-region LOD request/resolve passes.
+3. One generation pass loads/reconstructs XYZ, estimates the same bounded footprints, deduplicates exact cells and appends each newly occupied hash slot to `uniqueSlots[]`.
+4. **resolve_unique.comp** visits that compact list, finalizes RGB and writes 16-byte cell-key + RGBA16F instances. GPU counters drive both its dispatch and the cube draw.
+5. **VoxelRenderer** decodes signed XYZ + LOD, reconstructs centre/size and draws stored RGB directly.
 
-The existing XYZ buffer is reused rather than adding depth reconstruction to normal generation. Verification independently reconstructs positions from actual Vulkan depth and inverse VP. All lighting, normals, shadows, materials and tone mapping remain in the source stage. There are no ray–box tests, second source visibility pass, triangle–cell voxelization or persistent voxel volume.
+The default keeps cached XYZ because the measured depth variant was slower and changed quantization around exact grid planes. `--depth-source` removes the XYZ targets and reconstructs Vulkan `[0,1]` depth using inverse VP; `--no-depth-tiles` disables its shared 8×8 tile/halo. Verification checks actual source depth independently. All lighting, normals, shadows, materials and tone mapping remain in the source stage. There are no ray–box tests, second source visibility pass, triangle–cell voxelization or persistent voxel volume.
+
+The core filter uses **four compute dispatches**: two existing LOD passes, generation, and unique resolve. Sparse touched-slot clearing adds one dispatch. The first frame and clouds occupying at least a quarter of the table use a bulk clear; a previous-frame count already available to the HUD selects this fallback. `--touched-clear` / `--full-clear` force either path.
+
+Independent comparison switches are `--legacy-compaction`, `--unpacked`, `--full-clear`, `--touched-clear`, `--depth-source`, `--no-depth-tiles`, and `--local-dedup`. Local dedup uses a bounded shared mini hash and falls back to global insertion when full. It stays off by default because it reduced atomic traffic without a repeatable speedup on the available device.
 
 ## Verification and measurements
 
@@ -87,12 +91,14 @@ ctest --test-dir build --output-on-failure
 ./build/microvoxels --validation --verify --exercise-controls --frames 16 --width 480 --height 360
 ./build/microvoxels --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
 ./build/microvoxels --frames 120 --time 1 --no-ui --report profile.json
+./build/microvoxels --frames 120 --time 1 --no-ui --profile-stages --report stages.json
+python3 tools/profile_pipeline.py --binary build/microvoxels --output captures/pipeline-profile
 ```
 
-`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.
+`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and XYZ against source depth. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Depth mode adds a verification-only GPU reconstruction readback so CPU arithmetic near a grid boundary cannot change the reference cell; CPU inverse projection still checks reconstruction independently. Verification and screenshots add readbacks; leave them off for performance measurements.
 
 `--exercise` checks byte-identical frozen buffers across camera motion, then average/closest RGB and cube-light debug. `--exercise-controls` checks camera loss/reset, mouse capture/focus, empty freeze recovery, settings, mode switches and resize. `--exercise-stability` uses three stationary frames followed by nine small camera movements, with fixed source time, albedo lighting and one LOD. It verifies identical stationary cell/RGB sets and records turnover in a static floor patch. `tests/footprint_comparison.py` checks exact stationary RGB screenshots and measures matched motion silhouettes/coverage.
 
 Source sampling is capped at 2048 pixels per dimension. Tables are bounded; the HUD reports drops. Very fine cells, grazing angles, silhouettes, discontinuity fallback and footprint caps can still leave gaps or changing cells. Projected-size LOD is useful when source pixels cover many smaller cells.
 
-Read [the implementation notes](docs/IMPLEMENTATION.md) and [the measured comparison](docs/FOOTPRINTS.md). Opaque geometry only; transparency and temporal occupancy accumulation are not implemented.
+Read [the implementation notes](docs/IMPLEMENTATION.md), [the streamlining measurements](docs/STREAMLINING.md) and [the earlier footprint comparison](docs/FOOTPRINTS.md). Opaque geometry only; transparency and temporal occupancy accumulation are not implemented.

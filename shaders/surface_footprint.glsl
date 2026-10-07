@@ -1,5 +1,5 @@
 // Five source-buffer samples; no mesh IDs, source normals or material records.
-layout(set = 0, binding = 1) uniform sampler2D positions;
+#include "world_samples.glsl"
 struct Footprint {
     vec3 dx, dy;
     uint rejected;
@@ -26,7 +26,7 @@ vec3 surfaceStep(ivec2 p, ivec2 axis, vec3 hit, inout uint rejected) {
         ivec2 q = p + sign * axis;
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, params.extent.xy)))
             continue;
-        vec4 neighbor = texelFetch(positions, q, 0);
+        vec4 neighbor = footprintPosition(q);
         if (neighbor.w == 0)
             continue;
         vec3 delta = neighbor.xyz - hit;
