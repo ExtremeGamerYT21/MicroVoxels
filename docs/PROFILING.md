@@ -1,5 +1,9 @@
 # Measured profile and verification
 
+These are historical measurements of the pixel-sampled backend, recorded before triangle occupancy
+became the default. Select `--sample-occupancy` to exercise that backend; the timings below do not describe
+the current triangle path or its larger cell table. See the current CI reports for triangle correctness checks.
+
 This run used **software Vulkan**, not the user's AMD GPU. The available device was
 `llvmpipe (LLVM 20.1.2, 256 bits)`, Mesa 25.2.8, on Linux. These are Vulkan timestamp
 intervals on that software driver. They establish a working pipeline and a local bottleneck;
@@ -69,7 +73,7 @@ Windows and physical AMD hardware were not available for this run.
    Preserve exact keys and compare every change against the existing CPU reference.
 4. Once GPU stage costs are under control, use more frames in flight and delayed statistic readbacks.
    The current one-frame implementation serializes CPU/GPU work and uses FIFO presentation.
-5. Improve coverage with conservative samples or carefully bounded temporal occupancy. Keep it a
+5. For the pixel-sampled comparison, improve coverage with conservative samples or carefully bounded temporal occupancy. Keep it a
    visible shell and retain intentional popping rather than constructing full object volumes.
 
 ## Does ray tracing help?

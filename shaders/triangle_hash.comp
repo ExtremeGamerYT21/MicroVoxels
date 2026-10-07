@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "lattice.glsl"
+#include "triangle_cells.glsl"
+layout(local_size_x = 256) in;
+struct Slot {
+    uint owner, r, g, b, count, nearest;
+};
+layout(set = 0, binding = 8, std430) buffer Hash {
+    Slot slots[];
+};
+layout(set = 0, binding = 9, std430) buffer Counters {
+    uint vertexCount, instanceCount, firstVertex, firstInstance, hits, dropped, rootDropped,
+        candidateCount;
+    uint perLod[8];
+};
+float sampleDistance(uint id) {
+    return distance(candidatePoint(id), frame.cameraTime.xyz);
+}
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= min(candidateCount, uint(params.gridExtent.w)))
+        return;
+    uint id = i + 1u;
+    ivec4 key = candidates[i].key;
+    uint slot = hashKey(key) & uint(params.extent.z - 1);
+    vec3 point, color;
+    candidateSurface(id, point, color);
+    for (uint probe = 0; probe < 96u; probe++) {
+        uint s = (slot + probe) & uint(params.extent.z - 1);
+        uint owner = atomicCompSwap(slots[s].owner, 0u, id);
+        if (owner != 0u && any(notEqual(candidates[owner - 1u].key, key)))
+            continue;
+        uvec3 rgb = uvec3(round(clamp(color, 0, 1) * 1023));
+        atomicAdd(slots[s].r, rgb.r);
+        atomicAdd(slots[s].g, rgb.g);
+        atomicAdd(slots[s].b, rgb.b);
+        atomicAdd(slots[s].count, 1u);
+        if (params.flags.y == 0) {
+            uint old = atomicAdd(slots[s].nearest, 0u);
+            float d = distance(point, frame.cameraTime.xyz);
+            // Source triangle ID, not append order, resolves equal-depth ties deterministically.
+            while (old == 0u || d < sampleDistance(old) ||
+                   (d == sampleDistance(old) &&
+                    candidates[i].source.x < candidates[old - 1u].source.x)) {
+                uint found = atomicCompSwap(slots[s].nearest, old, id);
+                if (found == old)
+                    break;
+                old = found;
+            }
+        }
+        return;
+    }
+    atomicAdd(dropped, 1u);
+}

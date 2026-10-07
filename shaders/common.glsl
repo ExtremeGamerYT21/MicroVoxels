@@ -7,9 +7,11 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 }
 frame;
 layout(push_constant) uniform Parameters {
-    ivec4 extent; // sample width, sample height, hash capacity, max instances
-    vec4 config;  // base size, first LOD distance, hysteresis, splat scale
-    ivec4 flags;  // LOD count, average (1) / closest (0), cube-light debug, view mode
+    ivec4 extent;     // sample width, sample height, hash capacity, max instances
+    vec4 config;      // base size, first LOD distance, hysteresis, splat scale
+    ivec4 flags;      // LOD count, average (1) / closest (0), cube-light debug, view mode
+    ivec4 gridMin;    // dense triangle LOD regions; fixed maximum level 5
+    ivec4 gridExtent; // region dimensions, candidate capacity
 }
 params;
 vec3 animatePosition(vec3 p, float weight) {

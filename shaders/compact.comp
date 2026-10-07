@@ -2,6 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
 #include "lattice.glsl"
+#include "triangle_cells.glsl"
 layout(local_size_x = 256) in;
 layout(set = 0, binding = 1) uniform sampler2D positions;
 layout(set = 0, binding = 7) uniform sampler2D colors;
@@ -39,14 +40,25 @@ void main() {
     uint s = gl_GlobalInvocationID.x;
     if (s >= uint(params.extent.z) || slots[s].owner == 0)
         return;
-    ivec2 p = pixel(slots[s].owner - 1);
-    uint lod = imageLoad(lods, p).r;
-    ivec4 key = voxelKey(texelFetch(positions, p, 0).xyz, lod);
+    bool triangles = frame.options.z != 0;
+    ivec4 key;
+    if (triangles)
+        key = candidates[slots[s].owner - 1u].key;
+    else {
+        ivec2 p = pixel(slots[s].owner - 1);
+        key = voxelKey(texelFetch(positions, p, 0).xyz, imageLoad(lods, p).r);
+    }
+    uint lod = uint(key.w);
     float h = params.config.x * exp2(float(lod));
     uint idx = atomicAdd(instanceCount, 1); // max instances == hash capacity: cannot overflow
-    vec3 rgb = params.flags.y == 1
-                   ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
-                   : texelFetch(colors, pixel(slots[s].nearest - 1), 0).rgb;
+    vec3 rgb;
+    if (params.flags.y == 1)
+        rgb = vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count));
+    else if (triangles) {
+        vec3 point;
+        candidateSurface(slots[s].nearest, point, rgb);
+    } else
+        rgb = texelFetch(colors, pixel(slots[s].nearest - 1), 0).rgb;
     voxels[idx].centerSize = vec4((vec3(key.xyz) + .5) * h, h * params.config.w);
     voxels[idx].rgba = vec4(rgb, 1);
     atomicAdd(perLod[lod], 1);

@@ -1,7 +1,8 @@
 # Microvoxels
 
-A small C++20/Vulkan rendering experiment: ordinary triangle surfaces are shaded continuously,
-then their **visible world-space samples** become a sparse shell of **unlit coloured cubes**.
+A small C++20/Vulkan rendering experiment: the source visibility pass identifies ordinary triangles,
+then **triangle–cell overlap** generates a sparse shell of **unlit coloured cubes**. Colours are evaluated
+on the original source surfaces. The earlier pixel-sampled path remains available for comparison.
 
 The world is triangles. There is no voxel terrain, stored object volume, or persistent voxel world.
 The default cube fragment shader is literally `outColor = color;`. Cube lighting has a separate,
@@ -42,8 +43,8 @@ Shaders are compiled automatically and loaded from the build's shader directory.
 ## Try the experiment
 
 Start in side-by-side mode. The orange sphere uses interpolated smooth normals and a glossy source highlight.
-The blue crystal uses flat source normals. The tree and its curved leaves bend continuously in the source
-vertex shader. Watch the leaves while changing voxel size: their occupied world cells pop in and out.
+The blue crystal uses flat source normals. The tree and its curved leaves bend continuously in the shared
+source animation pass. Watch the leaves while changing voxel size: their occupied world cells pop in and out.
 
 Click the HUD's buttons and sliders, or use these keys:
 
@@ -52,7 +53,8 @@ Click the HUD's buttons and sliders, or use these keys:
 | WASD / Q / E | Fly forward/backward/sideways/down/up |
 | Hold right mouse | Look around |
 | R | Reset the camera to the starting view and unfreeze/resample the cloud |
-| C | Toggle adaptive LOD based on the spacing between source samples |
+| T | Toggle geometric triangle occupancy / pixel-sampled occupancy |
+| C | In the pixel-sampled path, toggle LOD based on source sample spacing |
 | Shift | Faster camera |
 | Tab | Source → microvoxels → side by side |
 | F | Freeze/unfreeze the generated cloud; camera and source animation continue |
@@ -67,17 +69,28 @@ Click the HUD's buttons and sliders, or use these keys:
 | F1 | Hide/show the HUD |
 | Escape | Exit |
 
-Freeze, then walk around a sphere or plant. Unseen sides are missing by design. The frozen colours
+Freeze, then walk around a sphere or plant. Triangles never selected by source visibility are missing by design. The frozen colours
 also retain their original view-dependent source shading, including the captured glossy highlight.
 Use the left pane to see the current continuous scene while the right pane displays that frozen shell.
 
 Defaults: base size 10 mm; first LOD boundary 4 m; five levels; ±10% hysteresis; 1.03× cube size.
-Adaptive LOD is enabled: it raises a region's level when source samples are too far apart for smaller cells.
-This reduces distant/grazing-angle gaps at the cost of larger visible cells. It respects the enabled level
-count; the coarsest available cells can still be too small. Press `C` or pass `--no-adaptive-lod` to compare
-the original distance-only selection. Additional source samples (`X`) can preserve finer cells.
-The grid origin stays at world `(0,0,0)` through camera movement. The slight cube enlargement helps
-coverage; set `Settings::splat` to `1.0` for exact cell-sized cubes.
+The default triangle path uses the depth-tested source triangle IDs only to select triangles. It then tests
+those triangles against geometric world-grid cells, independently of source pixel sample placement. A
+conservative region-frustum test skips work entirely outside the view. Static triangle occupancy is stable
+while it remains selected at the same LOD; true visibility, animation and LOD changes still update the shell.
+
+Colour is evaluated at the closest point on each intersecting source triangle to the cell centre, using the
+same interpolated normals, albedo, gloss and shadow function as the source view. Average mode weights triangle
+contributions equally; closest mode picks the nearest source point to the camera. Final cubes remain unlit.
+
+Press `T` or pass `--sample-occupancy` for the earlier pixel-sampled provider. In that path, adaptive LOD is
+enabled by default: it raises a region's level when samples are too far apart for smaller cells. `C` toggles
+that behaviour. Additional source samples (`X`) can reveal tiny triangles in both paths, but geometric
+occupancy itself no longer needs denser pixel samples to cover an already-selected triangle.
+The grid origin stays at world `(0,0,0)` through camera movement. The slight cube enlargement helps coverage;
+set `Settings::splat` to `1.0` for exact cell-sized cubes. Geometric coverage can generate substantially more
+cells than pixel sampling; the HUD reports capacity drops. Coarser base cells or earlier distance LOD reduce
+that work.
 
 If both panes are empty and the HUD reports `HITS 0`, press `R` to restore the starting view. Mouse look
 rebases on capture, stops on focus loss, and ignores cursor warps; profile reports include the camera pose
@@ -86,17 +99,18 @@ to help distinguish lost source visibility from a voxel draw failure.
 ## Pipeline
 
 1. **SourceWorld** makes 2,860 ordinary triangles: ground, sphere, crystal, rocks, trunk, branches, leaves.
-2. **SourceRenderer** draws a source shadow map and a G-buffer of valid world positions and already-shaded
-   linear RGB. Lighting, normals, procedural checker colour, gloss, and shadows all belong to this stage.
-3. **VisualVoxelizer** reduces distance/coverage requests to one LOD per world region, resolves sample LODs,
-   hashes exact cell keys, reduces samples, and compacts
-   the occupied cells into GPU instances and a GPU-written indirect draw command.
+2. **SourceRenderer** animates a shared GPU vertex buffer once, then draws a shadow map and depth-tested
+   G-buffer of triangle IDs, world positions and already-shaded linear RGB.
+3. **VisualVoxelizer** marks visible triangle IDs, selects hysteretic LOD for world regions, enumerates
+   intersecting triangle–AABB cells, shades source surface points, deduplicates exact keys and compacts the
+   occupied cells into GPU instances and a GPU-written indirect draw command.
 4. **VoxelRenderer** depth-tests those instances and writes their stored colours. All faces of one normal
    voxel have identical RGB. Source comparison, debug cube lighting, and HUD are separate draw pipelines.
 
-`SurfaceSamples` is the provider contract. A future triangle ray-query renderer, SDF, or parametric source
-can supply equivalent positions/RGB without changing the voxel stages. This milestone uses the explicitly
-permitted raster source path; it does **not** implement KHR ray queries or acceleration structures yet.
+`TriangleSurfaces` is the triangle-specific source contract. The alternative `SurfaceSamples` contract
+retains the pixel position/RGB provider, so a future triangle ray-query renderer, SDF, or parametric source
+can supply samples without a triangle-overlap stage. Hardware ray queries and acceleration structures are
+not implemented in this version.
 
 Read [the implementation notes](docs/IMPLEMENTATION.md) for exact key handling, LOD history, synchronization,
 capacity limits, and known artefacts. Read [the measured profile](docs/PROFILING.md) for results and next steps.
@@ -107,15 +121,18 @@ capacity limits, and known artefacts. Read [the measured profile](docs/PROFILING
 ctest --test-dir build --output-on-failure
 ./build/microvoxels --validation --verify --exercise --frames 8 --width 480 --height 360
 ./build/microvoxels --validation --verify --exercise-controls --frames 16 --width 480 --height 360
+./build/microvoxels --validation --exercise-stability --frames 6 --width 480 --height 360
 ./build/microvoxels --frames 120 --width 1100 --height 720 --no-ui --report profile.json
 ./build/microvoxels --frames 1 --time 1.2 --screenshot comparison.ppm
 ```
 
 `--validation` requires `VK_LAYER_KHRONOS_validation`. `--verify` performs expensive readbacks and CPU
-reference checks; leave it off when measuring interactive performance. `--exercise` freezes the cloud,
+reference checks, including independent polygon clipping for triangle occupancy and source-surface RGB; leave it off when measuring interactive performance. `--exercise` freezes the cloud,
 moves the camera, checks byte-identical instances/counters, unfreezes, and exercises closest RGB and debug
 cube lighting. `--exercise-controls` checks mouse capture/focus, looking away, freezing an empty cloud,
-camera reset, setting changes, sample-target recreation, and window resize. `--hidden` hides a GLFW window;
+camera reset, setting changes, sample-target recreation, and window resize. `--exercise-stability` regenerates
+the cloud while changing camera position/orientation, source sampling density and window size, then checks
+that a static floor patch retains identical cell keys and albedo colours. `--hidden` hides a GLFW window;
 it still needs a display. In CI, use `xvfb-run -a`.
 
 JSON reports contain source triangle count, sampling resolution, visible hits, unique voxels, per-LOD counts,

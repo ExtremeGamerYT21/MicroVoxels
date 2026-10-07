@@ -30,6 +30,7 @@ struct alignas(16) Parameters {
     glm::ivec4 extent;
     glm::vec4 config;
     glm::ivec4 flags;
+    glm::ivec4 gridMin, gridExtent;
 };
 struct Voxel {
     glm::vec4 centerSize, rgba;
@@ -39,7 +40,7 @@ struct Counters {
         pad;
     uint32_t perLod[8];
 };
-static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 64 && sizeof(Parameters) == 48 &&
+static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 64 && sizeof(Parameters) == 80 &&
               sizeof(Frame) == 176);
 class VulkanContext {
   public:

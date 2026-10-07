@@ -1,18 +1,21 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 normal;
-layout(location = 2) in vec3 color;
-layout(location = 3) in vec2 material;
+#include "source_vertex.glsl"
+layout(set = 0, binding = 3, std430) readonly buffer AnimatedVertices {
+    SourceVertex vertices[];
+};
 layout(location = 0) out vec3 worldPosition;
 layout(location = 1) out vec3 worldNormal;
 layout(location = 2) out vec3 albedo;
 layout(location = 3) out float gloss;
+layout(location = 4) flat out uint triangleId;
 void main() {
-    worldPosition = animatePosition(position, material.x);
-    worldNormal = animateNormal(normal, position, material.x);
-    albedo = color;
-    gloss = material.y;
+    SourceVertex v = vertices[gl_VertexIndex];
+    worldPosition = v.position.xyz;
+    worldNormal = v.normal.xyz;
+    albedo = v.albedo.xyz;
+    gloss = v.normal.w;
+    triangleId = uint(gl_VertexIndex) / 3u + 1u;
     gl_Position = frame.viewProjection * vec4(worldPosition, 1);
 }

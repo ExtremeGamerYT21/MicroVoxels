@@ -11,7 +11,49 @@ by the final sRGB colour attachment. No normals or source material records enter
 Both position textures are retained only to identify visible world regions across the immediately previous
 generated frame. They are not a persistent geometry representation. Freezing deliberately retains one cloud.
 
-## Nested grid and hysteresis
+## Triangle occupancy (default)
+
+`TriangleSurfaces` carries the depth-tested R32UI triangle ID texture, a shared animated vertex buffer and
+source shadow map. A compute pass animates the source vertices once. The shadow pass, source raster pass
+and triangle-cell shaders all read those exact vertices. A flat vertex-generated ID avoids requiring
+geometry shaders. Empty pixels use ID zero; only IDs surviving the source depth test are marked visible.
+
+The triangle path enumerates world regions within each marked triangle's bounds. It rejects regions
+outside the camera frustum or not intersecting the triangle. Within each remaining region it enumerates
+cells at that region's distance LOD and applies the 13-axis separating-axis triangle–AABB test. Occupancy
+uses the geometric cell, before the 1.03 visual enlargement. Closed-box contacts are retained, including
+both sides of a grid-aligned plane. A tolerance of 0.0001 cell widths covers float rounding.
+
+Triangle LOD regions always use `base * 32`, independently of the enabled level count. Their dense indices
+cover the source scene's conservative animation bounds. This keeps the selected LOD independent of source
+pixels and retains hysteresis even for temporarily hidden regions. Region centres use the original 90/110%
+distance thresholds. Base-size/level-count/backend changes and source-target resize reset history. No parent
+and child levels coexist within a region. Screen-space coverage LOD applies only to the sample backend.
+
+A bounded append buffer holds up to 4,194,304 immutable `{ivec4 key; uvec4 source}` contributions. After an
+explicit compute dependency, the colour/hash pass can recover any claimed owner's full key immediately.
+Each cell/triangle contribution shades the closest point on that source triangle to the cell centre.
+Barycentric normals, albedo and gloss are evaluated with the same `source_shading.glsl` function used by
+the primary fragment shader, including source shadows. The final instance still contains only centre/size
+and RGBA. Average mode averages triangle contributions; closest mode selects the closest source point,
+with triangle ID breaking exact-depth ties. Candidate append order has no visual meaning.
+
+The source `HITS` count still measures visible pixels. The counter's formerly reserved word now records
+triangle contributions. Append/hash capacity failures increment `DROPPED`; they do not silently switch to
+pixel-based occupancy. Large visible triangles and very fine cells can exceed the fixed capacity. Source
+triangle selection remains visibility-dependent: subpixel triangles can appear/disappear, and marking one
+visible fragment selects the triangle's other cells within the conservative frustum. There is no cell-level
+occlusion test. Animation, true triangle visibility changes, and distance LOD can still change occupancy.
+
+`--verify` checks the actual GPU triangle-ID image, animated vertex buffer, region levels, exact emitted
+cell set, contribution count, source-surface colours and indirect draw against the CPU. CPU occupancy uses
+six-plane polygon clipping in double precision rather than reimplementing the GPU separating-axis test.
+Colour checks retain a narrow numerical tolerance; at a discontinuous shadow comparison they also allow
+the interval produced by adjacent texel/depth rounding. This does not relax the exact occupancy check.
+`--exercise-stability` checks a live static floor patch across camera, supersampling and resize changes;
+freeze is never enabled in that test.
+
+## Pixel-sampled grid and hysteresis (comparison backend)
 
 For level `l`, `h = base * 2^l` and `cell = floor(hit / h)`. The centre is `(cell + 0.5) * h`.
 Negative coordinates use floor, and every grid shares the world origin. A colour reduction key includes
@@ -42,21 +84,22 @@ coverage adjustment from introducing overlapping parents and children. Toggling 
 
 ## Deduplication without publication races
 
-An empty hash slot contains owner ID `0`. A compute invocation claims it atomically with `sampleID + 1`.
-The owner ID refers to immutable source position and already-produced LOD images, so competing invocations
+Both backends use immutable owner data. An empty hash slot contains owner ID `0`. A compute invocation claims it atomically with `sampleID + 1`.
+In the sample backend the owner ID refers to immutable source position and already-produced LOD images, so competing invocations
 can derive the entire exact key immediately. There is no lock, partially published multi-word cell key,
 float-atomic extension, or cross-workgroup spin-wait on an owner initializing its key.
 
 Hash collisions are resolved by probing and comparing that exact key. Each accepted sample accumulates
 10-bit RGB using 32-bit integer atomics and increments a count. RGB sum overflow is avoided by capping each
-source image dimension at 2048: `2048 * 2048 * 1023 < 2^32`. Closest mode chooses minimum camera distance,
+source image dimension at 2048 and triangle contributions at 4,194,304: `2048 * 2048 * 1023 < 2^32`.
+Closest mode chooses minimum camera distance,
 with source sample ID as a deterministic exact-depth tie-breaker, using an atomic compare-and-swap loop.
 
 After the accumulation dispatch finishes, compaction visits occupied slots, averages RGB or selects the
 closest sample colour, writes one `Voxel { vec4 centerSize; vec4 rgba; }`, and updates the indirect draw/counts.
 Output capacity equals hash capacity, so compaction cannot write beyond the instance buffer.
 
-The table has 1,048,576 slots and a 96-probe budget. The world-region history table has 262,144 slots and
+The table has 4,194,304 slots and a 96-probe budget. The world-region history table has 262,144 slots and
 a 64-probe budget. Exceeding either budget increments a visible statistic. A full visual table can create
 holes; saturated root metadata loses hysteresis and consistently uses the coarsest level for an unregistered
 region. The prototype reports these limits rather
@@ -94,10 +137,10 @@ the view matrix is built. Toggle keys respond only to key presses, while size/di
 
 ## Current compromises
 
-- Raster sampling reveals only the nearest opaque source layer. Cubes cannot recover surfaces never sampled.
+- Source visibility reveals only the nearest opaque layer. The triangle path fills selected triangles; triangles never selected remain absent.
 - A cell crossing a silhouette is a whole cube. It can protrude or partially cover a foreground feature.
-- Screen sampling can miss small cells; 2×2 sampling and 3% enlarged splats reduce gaps without voxelizing volumes.
-- Coverage LOD reduces gaps at grazing angles, but can reach the enabled maximum or miss isolated thin
+- In the comparison backend, screen sampling can miss small cells; 2×2 sampling and 3% enlarged splats reduce gaps without voxelizing volumes.
+- In the comparison backend, coverage LOD reduces gaps at grazing angles, but can reach the enabled maximum or miss isolated thin
   surfaces. It also cannot recover occluded surfaces exposed by moving around a frozen cloud. There is no
   temporal occupancy accumulation yet.
 - Averaging a cell that contains several source surfaces mixes their already-shaded colours. Closest mode
@@ -110,3 +153,5 @@ the view matrix is built. Toggle keys respond only to key presses, while size/di
 Reference APIs: [Khronos compute tutorial](https://github.khronos.org/Vulkan-Site/tutorial/latest/11_Compute_Shader.html),
 [indirect drawing](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDrawIndirect.html), and
 [timestamp queries](https://docs.vulkan.org/samples/latest/samples/api/timestamp_queries/README.html).
+
+Triangle–box reference: [Akenine-Möller, Fast 3D Triangle–Box Overlap Testing (2001)](https://fileadmin.cs.lth.se/cs/Personal/Tomas_Akenine-Moller/code/tribox_tam.pdf).

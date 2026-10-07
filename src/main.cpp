@@ -1,6 +1,7 @@
 #include "hud.hpp"
 #include "lattice.hpp"
 #include "source_renderer.hpp"
+#include "triangle_reference.hpp"
 #include "voxel_renderer.hpp"
 #include <algorithm>
 #include <chrono>
@@ -18,7 +19,7 @@ using namespace micro;
 struct Options {
     int width = 1100, height = 720, frames = 0;
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
-         exerciseControls = false;
+         exerciseControls = false, exerciseStability = false;
     float fixedTime = -1;
     std::string screenshot, report;
     Settings settings;
@@ -48,6 +49,10 @@ Options parse(int argc, char **argv) {
             o.exercise = true;
         else if (a == "--exercise-controls")
             o.exerciseControls = true;
+        else if (a == "--exercise-stability")
+            o.exerciseStability = true;
+        else if (a == "--sample-occupancy")
+            o.settings.triangleOccupancy = false;
         else if (a == "--no-ui")
             o.noUi = true;
         else if (a == "--time")
@@ -81,11 +86,12 @@ Options parse(int argc, char **argv) {
                 << "--voxel-size METERS --lod-distance METERS --levels 1..6 --mode 0|1|2\n"
                 << "--lighting 0|1|2 --debug-cubes --closest --supersampling --time SECONDS\n"
                 << "--no-ui --screenshot FILE.ppm --report FILE.json\n"
-                << "--no-adaptive-lod --exercise-controls (requires 16 frames)\n"
+                << "--sample-occupancy --no-adaptive-lod --exercise-controls (16 frames) "
+                   "--exercise-stability (6 frames)\n"
                 << "WASD/QE fly; right mouse look; Tab view; F freeze; G cube-light debug;\n"
                 << "O average/closest; X supersampling; H lighting; P pause; +/- voxel size;\n"
                 << "[/] LOD distance; 1..6 LOD count; R reset view; C adaptive LOD; F1 HUD; Esc "
-                   "exit.\n";
+                   "exit; T triangle/pixel occupancy.\n";
             std::exit(0);
         } else
             throw std::runtime_error("Unknown option: " + a);
@@ -102,6 +108,14 @@ Options parse(int argc, char **argv) {
     if (o.exerciseControls && (o.frames < 16 || o.exercise))
         throw std::runtime_error(
             "--exercise-controls requires 16 frames and cannot combine with --exercise");
+    if (o.exerciseStability &&
+        (o.frames < 6 || o.exercise || o.exerciseControls || !o.settings.triangleOccupancy))
+        throw std::runtime_error(
+            "--exercise-stability requires 6 frames, triangle occupancy, and no other exercise");
+    if (o.exerciseStability) {
+        o.verify = true;
+        o.fixedTime = 1;
+    }
     o.settings.visibleHud = !o.noUi;
     return o;
 }
@@ -138,7 +152,9 @@ void keyCallback(GLFWwindow *w, int key, int, int action, int) {
     auto &s = *in.settings;
     if (key == GLFW_KEY_R)
         resetCamera(w, in);
-    if (key == GLFW_KEY_C)
+    if (key == GLFW_KEY_T)
+        s.triangleOccupancy = !s.triangleOccupancy;
+    if (key == GLFW_KEY_C && !s.triangleOccupancy)
         s.adaptiveLod = !s.adaptiveLod;
     if (key == GLFW_KEY_ESCAPE)
         glfwSetWindowShouldClose(w, 1);
@@ -249,9 +265,12 @@ void exerciseControls(int frame, GLFWwindow *w, Input &in) {
         keyCallback(w, GLFW_KEY_F, 0, GLFW_REPEAT, 0);
         if (s.frozen)
             throw std::runtime_error("A repeated key toggled freeze");
+        press(GLFW_KEY_T);
         press(GLFW_KEY_C);
     }
     if (frame == 6) {
+        if (!s.triangleOccupancy)
+            press(GLFW_KEY_T);
         s.base = .0216f;
         s.distance = 8.6f;
         s.levels = 5;
@@ -271,7 +290,7 @@ void exerciseControls(int frame, GLFWwindow *w, Input &in) {
         press(GLFW_KEY_TAB);
         press(GLFW_KEY_6);
         press(GLFW_KEY_C);
-        s.base = .0057f;
+        s.base = s.triangleOccupancy ? .015f : .0057f;
         int width, height;
         glfwGetWindowSize(w, &width, &height);
         glfwSetWindowSize(w, width + 64, height + 48);
@@ -282,7 +301,7 @@ void exerciseControls(int frame, GLFWwindow *w, Input &in) {
     }
     if (frame == 12) {
         press(GLFW_KEY_6);
-        s.base = .0057f;
+        s.base = s.triangleOccupancy ? .015f : .0057f;
     }
     if (frame == 13) {
         mouseButton(w, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, 0);
@@ -320,27 +339,36 @@ void copyImage(VulkanContext &vk, Image &im, Buffer &buffer, VkImageLayout layou
 }
 struct Readback {
     VulkanContext &vk;
-    Buffer counters, instances, positions, colors, lods, pixels;
-    Readback(VulkanContext &context, bool verify) : vk(context) {
+    Buffer counters, instances, positions, colors, lods, pixels, triangleIds, sourceVertices,
+        rootLods, shadow;
+    Readback(VulkanContext &context, bool verify, uint32_t vertexCount) : vk(context) {
         counters = vk.buffer(sizeof(Counters), VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
-        if (verify)
+        if (verify) {
             instances = vk.buffer(VisualVoxelizer::Capacity * sizeof(Voxel),
                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            sourceVertices = vk.buffer(vertexCount * sizeof(SourceVertex),
+                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            rootLods = vk.buffer(VisualVoxelizer::RootCapacity * 8ull,
+                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            shadow = vk.buffer(1024 * 1024 * 4ull, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+        }
     }
     void resize(uint32_t w, uint32_t h, VkExtent2D display, bool verify, bool screenshot) {
-        for (auto b : {&positions, &colors, &lods, &pixels})
+        for (auto b : {&positions, &colors, &lods, &pixels, &triangleIds})
             vk.destroy(*b);
         if (verify) {
             positions = vk.buffer(w * uint64_t(h) * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
             colors = vk.buffer(positions.size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
             lods = vk.buffer(w * uint64_t(h) * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+            triangleIds = vk.buffer(lods.size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
         }
         if (screenshot)
             pixels = vk.buffer(display.width * uint64_t(display.height) * 4,
                                VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
     }
     ~Readback() {
-        for (auto b : {&counters, &instances, &positions, &colors, &lods, &pixels})
+        for (auto b : {&counters, &instances, &positions, &colors, &lods, &pixels, &triangleIds,
+                       &sourceVertices, &rootLods, &shadow})
             vk.destroy(*b);
     }
 };
@@ -477,18 +505,39 @@ void screenshot(const std::string &path, const VulkanContext &vk, const Readback
         f.write(rgb, 3);
     }
 }
+struct BufferCleanup {
+    VulkanContext &vk;
+    Buffer &buffer;
+    ~BufferCleanup() {
+        if (buffer.handle) {
+            vkDeviceWaitIdle(vk.device);
+            vk.destroy(buffer);
+        }
+    }
+};
+struct QueryCleanup {
+    VulkanContext &vk;
+    VkQueryPool &query;
+    ~QueryCleanup() {
+        if (query) {
+            vkDeviceWaitIdle(vk.device);
+            vkDestroyQueryPool(vk.device, query, nullptr);
+        }
+    }
+};
 int main(int argc, char **argv) {
     try {
         Options opt = parse(argc, argv);
         VulkanContext vk(opt.width, opt.height, opt.hidden, opt.validation);
         Buffer frameBuffer = vk.buffer(sizeof(Frame), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
+        BufferCleanup frameCleanup{vk, frameBuffer};
         {
             SourceWorld world;
             SourceRenderer source(vk, world, frameBuffer);
-            VisualVoxelizer voxelizer(vk, frameBuffer);
+            VisualVoxelizer voxelizer(vk, frameBuffer, source.triangles());
             VoxelRenderer renderer(vk, voxelizer);
             Hud hud(vk, renderer.pass, voxelizer.setLayout);
-            Readback readback(vk, opt.verify || opt.exercise);
+            Readback readback(vk, opt.verify || opt.exercise, source.vertexCount);
             Settings &s = opt.settings;
             glm::vec3 camera(5.8f, 3.6f, 8.4f);
             Input input{&s, &hud, &camera};
@@ -498,6 +547,7 @@ int main(int argc, char **argv) {
             glfwSetCursorPosCallback(vk.window, mouseMove);
             glfwSetWindowFocusCallback(vk.window, focusCallback);
             VkQueryPool queries{};
+            QueryCleanup queryCleanup{vk, queries};
             if (vk.timestampBits) {
                 VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -512,7 +562,8 @@ int main(int argc, char **argv) {
             RootHistory history;
             std::vector<Voxel> frozenSnapshot;
             Counters frozenCounts{};
-            int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0;
+            int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0, stabilityChecks = 0;
+            std::map<Cell, glm::vec4> stableCells;
             auto last = std::chrono::steady_clock::now();
             float animation = 0, fps = 60;
             int frameNumber = 0;
@@ -522,6 +573,29 @@ int main(int argc, char **argv) {
                 glfwPollEvents();
                 if (opt.exerciseControls && frameNumber < 16)
                     exerciseControls(frameNumber, vk.window, input);
+                if (opt.exerciseStability) {
+                    if (frameNumber == 0) {
+                        resetCamera(vk.window, input);
+                        s.base = .02f;
+                        s.levels = 1;
+                        s.lighting = 0;
+                    }
+                    if (frameNumber == 1)
+                        input.yaw += .003f;
+                    if (frameNumber == 2)
+                        camera.x += .02f;
+                    if (frameNumber == 3) {
+                        camera.y += .04f;
+                        input.pitch += .005f;
+                    }
+                    if (frameNumber == 4)
+                        s.supersampling = true;
+                    if (frameNumber == 5) {
+                        int w, h;
+                        glfwGetWindowSize(vk.window, &w, &h);
+                        glfwSetWindowSize(vk.window, w + 32, h + 24);
+                    }
+                }
                 int fw, fh;
                 glfwGetFramebufferSize(vk.window, &fw, &fh);
                 if (fw == 0 || fh == 0) {
@@ -553,7 +627,8 @@ int main(int argc, char **argv) {
                 if (s.supersampling != previous.supersampling)
                     resize = true;
                 if (s.base != previous.base || s.levels != previous.levels ||
-                    s.adaptiveLod != previous.adaptiveLod) {
+                    (!s.triangleOccupancy && s.adaptiveLod != previous.adaptiveLod) ||
+                    s.triangleOccupancy != previous.triangleOccupancy) {
                     voxelizer.resetHistory = true;
                     history.clear();
                 }
@@ -567,7 +642,7 @@ int main(int argc, char **argv) {
                     uint32_t w = std::max(1u, uint32_t(fw * scale)),
                              h = std::max(1u, uint32_t(fh * scale));
                     source.resize(w, h);
-                    voxelizer.resize(source.samples());
+                    voxelizer.resize(source.samples(), source.triangles());
                     renderer.resize();
                     readback.resize(w, h, vk.extent, opt.verify, !opt.screenshot.empty());
                     history.clear();
@@ -606,13 +681,25 @@ int main(int argc, char **argv) {
                                                  glm::vec3(0, 1, 0), glm::vec3(0, 1, 0));
                 frame.cameraTime = glm::vec4(camera, time);
                 frame.light = glm::vec4(light, 1.15f);
-                frame.options = glm::vec4(float(s.lighting), s.adaptiveLod ? 1.f : 0.f, 0, 0);
+                frame.options =
+                    glm::vec4(float(s.lighting), s.adaptiveLod ? 1.f : 0.f,
+                              s.triangleOccupancy ? 1.f : 0.f, float(world.triangleCount()));
                 std::memcpy(frameBuffer.mapped, &frame, sizeof(frame));
                 parameters.extent = {int(source.width), int(source.height),
                                      int(VisualVoxelizer::Capacity),
                                      int(VisualVoxelizer::Capacity)};
                 parameters.config = {s.base, s.distance, .1f, s.splat};
                 parameters.flags = {s.levels, s.average ? 1 : 0, s.cubeLight ? 1 : 0, s.mode};
+                auto triangles = source.triangles();
+                float rootSize = s.base * 32.f;
+                glm::ivec3 gridMin(glm::floor(triangles.lower / rootSize - .0001f)),
+                    gridMax(glm::floor(triangles.upper / rootSize + .0001f));
+                glm::ivec3 gridExtent = gridMax - gridMin + 1;
+                if (uint64_t(gridExtent.x) * gridExtent.y * gridExtent.z >
+                    VisualVoxelizer::RootCapacity)
+                    throw std::runtime_error("Triangle LOD grid exceeds region capacity");
+                parameters.gridMin = glm::ivec4(gridMin, 0);
+                parameters.gridExtent = glm::ivec4(gridExtent, VisualVoxelizer::CandidateCapacity);
                 bool generating = !s.frozen || !voxelizer.cloudReady;
                 bool referenceReset = voxelizer.resetHistory;
                 if (referenceReset)
@@ -638,7 +725,7 @@ int main(int argc, char **argv) {
                 if (queries)
                     vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
                 if (generating)
-                    voxelizer.generate(parameters, queries);
+                    voxelizer.generate(parameters, queries, s.triangleOccupancy);
                 else if (queries)
                     for (uint32_t i = 2; i <= 4; i++)
                         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries,
@@ -666,8 +753,20 @@ int main(int argc, char **argv) {
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     copyImage(vk, source.color, readback.colors,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                    copyImage(vk, voxelizer.lods[voxelizer.current], readback.lods,
-                              VK_IMAGE_LAYOUT_GENERAL);
+                    if (s.triangleOccupancy) {
+                        copyImage(vk, source.triangleIds, readback.triangleIds,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        copyImage(vk, source.shadow, readback.shadow,
+                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+                        VkBufferCopy verticesCopy{0, 0, source.animatedVertices.size},
+                            rootsCopy{0, 0, voxelizer.roots[voxelizer.current].size};
+                        vkCmdCopyBuffer(vk.cmd, source.animatedVertices.handle,
+                                        readback.sourceVertices.handle, 1, &verticesCopy);
+                        vkCmdCopyBuffer(vk.cmd, voxelizer.roots[voxelizer.current].handle,
+                                        readback.rootLods.handle, 1, &rootsCopy);
+                    } else
+                        copyImage(vk, voxelizer.lods[voxelizer.current], readback.lods,
+                                  VK_IMAGE_LAYOUT_GENERAL);
                 }
                 if (!opt.screenshot.empty())
                     copyImage(vk, renderer.output, readback.pixels,
@@ -740,8 +839,50 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (opt.verify && generating) {
-                    verify(parameters, frame, readback, counts, history);
+                    if (s.triangleOccupancy)
+                        verifyTriangles(
+                            parameters, frame,
+                            static_cast<const SourceVertex *>(readback.sourceVertices.mapped),
+                            static_cast<const uint32_t *>(readback.triangleIds.mapped),
+                            static_cast<const uint32_t *>(readback.rootLods.mapped),
+                            static_cast<const float *>(readback.shadow.mapped),
+                            static_cast<const Voxel *>(readback.instances.mapped), counts, history);
+                    else
+                        verify(parameters, frame, readback, counts, history);
                     verifiedFrames++;
+                }
+                if (opt.exerciseStability && frameNumber < 6) {
+                    if (!generating)
+                        throw std::runtime_error("Stability test froze generation");
+                    std::map<Cell, glm::vec4> cells;
+                    auto *data = static_cast<const Voxel *>(readback.instances.mapped);
+                    for (uint32_t i = 0; i < counts.instanceCount; i++) {
+                        const auto &v = data[i];
+                        if (v.centerSize.x >= -4.3f && v.centerSize.x <= -3.7f &&
+                            std::abs(v.centerSize.z) <= .3f && std::abs(v.centerSize.y) < .011f)
+                            cells.emplace(
+                                cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, s.base, 0),
+                                v.rgba);
+                    }
+                    if (frameNumber == 0) {
+                        if (cells.size() < 500)
+                            throw std::runtime_error(
+                                "Stability scene did not cover the test patch");
+                        stableCells = cells;
+                    } else {
+                        if (cells.size() != stableCells.size())
+                            throw std::runtime_error(
+                                "Camera or sampling resolution changed static triangle occupancy");
+                        for (const auto &[key, color] : stableCells) {
+                            auto found = cells.find(key);
+                            if (found == cells.end() ||
+                                glm::any(glm::greaterThan(glm::abs(found->second - color),
+                                                          glm::vec4(.000001f))))
+                                throw std::runtime_error("Camera or sampling resolution changed "
+                                                         "static triangle cells or albedo");
+                        }
+                        stabilityChecks++;
+                    }
                 }
                 if (opt.exercise) {
                     auto *data = static_cast<const Voxel *>(readback.instances.mapped);
@@ -783,11 +924,20 @@ int main(int argc, char **argv) {
             if (opt.exerciseControls)
                 std::cout << "Camera reset, mouse capture/focus, settings and resize checks: "
                           << controlChecks << '\n';
+            if (opt.exerciseStability)
+                std::cout << "Live triangle stability: " << stableCells.size()
+                          << " identical cells/colours across " << stabilityChecks
+                          << " camera/resolution changes\n";
             if (timedFrames)
                 for (int i = 0; i < 6; i++)
                     totals[i] /= timedFrames;
-            const char *labels[] = {"source_and_shadow_ms", "lod_and_clear_ms", "hash_ms",
-                                    "compact_ms",           "final_render_ms",  "hud_ms"};
+            const char *labels[] = {"source_and_shadow_ms",
+                                    s.triangleOccupancy ? "visibility_lod_occupancy_ms"
+                                                        : "lod_and_clear_ms",
+                                    "hash_ms",
+                                    "compact_ms",
+                                    "final_render_ms",
+                                    "hud_ms"};
             if (!opt.report.empty()) {
                 auto parent = std::filesystem::path(opt.report).parent_path();
                 if (!parent.empty())
@@ -812,8 +962,13 @@ int main(int argc, char **argv) {
                   << ",\n  \"control_checks\": " << controlChecks << ",\n  \"camera_position\": ["
                   << camera.x << ", " << camera.y << ", " << camera.z << "]"
                   << ",\n  \"camera_yaw\": " << input.yaw
-                  << ",\n  \"camera_pitch\": " << input.pitch
-                  << ",\n  \"adaptive_lod\": " << (s.adaptiveLod ? "true" : "false")
+                  << ",\n  \"camera_pitch\": " << input.pitch << ",\n  \"occupancy_backend\": \""
+                  << (s.triangleOccupancy ? "triangle-box" : "pixel-samples") << "\""
+                  << ",\n  \"triangle_contributions\": " << counts.pad
+                  << ",\n  \"stability_checks\": " << stabilityChecks
+                  << ",\n  \"stable_cells_checked\": " << stableCells.size()
+                  << ",\n  \"adaptive_lod\": "
+                  << (!s.triangleOccupancy && s.adaptiveLod ? "true" : "false")
                   << ",\n  \"validation_errors\": " << vk.validationErrors
                   << ",\n  \"timestamp_supported\": " << (queries ? "true" : "false")
                   << ",\n  \"voxels_per_lod\": [";
@@ -824,8 +979,10 @@ int main(int argc, char **argv) {
                     f << (i ? ", " : "") << "\"" << labels[i] << "\": " << totals[i];
                 f << "}\n}\n";
             }
-            if (queries)
+            if (queries) {
                 vkDestroyQueryPool(vk.device, queries, nullptr);
+                queries = {};
+            }
             if (vk.validationErrors)
                 throw std::runtime_error("Vulkan validation reported errors");
         }

@@ -1,0 +1,21 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "source_vertex.glsl"
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 2, std430) readonly buffer OriginalVertices {
+    SourceVertex original[];
+};
+layout(set = 0, binding = 3, std430) writeonly buffer AnimatedVertices {
+    SourceVertex vertices[];
+};
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(frame.options.w) * 3u)
+        return;
+    SourceVertex v = original[i];
+    vertices[i].position = vec4(animatePosition(v.position.xyz, v.position.w), v.position.w);
+    vertices[i].normal =
+        vec4(animateNormal(v.normal.xyz, v.position.xyz, v.position.w), v.normal.w);
+    vertices[i].albedo = v.albedo;
+}
