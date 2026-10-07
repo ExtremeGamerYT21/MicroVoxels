@@ -37,7 +37,7 @@ for ($round = 0; $round -lt $Repeats; ++$round) {
         if (!$Live) { $demoArgs += @('--freeze-after', '8') }
         if ($PointSplats) { $demoArgs += '--point-splats' }
         if ($NoAdaptiveLod) { $demoArgs += '--no-adaptive-lod' }
-        Write-Host "Round $($round + 1)/$Repeats: $($config.Name)"
+        Write-Host "Round $($round + 1)/${Repeats}: $($config.Name)"
         & $Exe @demoArgs
         if ($LASTEXITCODE -ne 0) { throw "Demo failed: $($config.Name), exit $LASTEXITCODE" }
         $report = Get-Content -Raw $reportPath | ConvertFrom-Json
