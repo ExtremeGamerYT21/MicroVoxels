@@ -21,6 +21,7 @@ struct Options {
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
          exerciseControls = false, exerciseStability = false;
     float fixedTime = -1;
+    SourceScene scene = SourceScene::Garden;
     std::string screenshot, report, captureSequence;
     Settings settings;
 };
@@ -33,7 +34,15 @@ Options parse(int argc, char **argv) {
                 throw std::runtime_error("Missing value for " + a);
             return std::string(argv[i]);
         };
-        if (a == "--width")
+        if (a == "--scene") {
+            auto scene = value();
+            if (scene == "garden")
+                o.scene = SourceScene::Garden;
+            else if (scene == "test")
+                o.scene = SourceScene::Test;
+            else
+                throw std::runtime_error("Unknown scene; use --scene garden or --scene test");
+        } else if (a == "--width")
             o.width = std::stoi(value());
         else if (a == "--height")
             o.height = std::stoi(value());
@@ -90,6 +99,7 @@ Options parse(int argc, char **argv) {
         else if (a == "--help") {
             std::cout
                 << "Microvoxels: Vulkan triangle samples -> unlit cubic splats\n"
+                << "--scene garden|test (default: garden)\n"
                 << "--width N --height N --frames N --hidden --validation --verify --exercise\n"
                 << "--voxel-size METERS --lod-distance METERS --levels 1..6 --mode 0|1|2\n"
                 << "--lighting 0|1|2 --debug-cubes --closest --supersampling --time SECONDS\n"
@@ -136,6 +146,8 @@ struct Input {
     double lastX{}, lastY{};
     bool looking = false, anchored = false;
     float yaw = -2.14f, pitch = -.27f;
+    glm::vec3 homeCamera{5.8f, 3.6f, 8.4f};
+    float homeYaw = -2.14f, homePitch = -.27f;
 };
 void stopLooking(GLFWwindow *w, Input &in) {
     in.looking = in.anchored = false;
@@ -143,9 +155,9 @@ void stopLooking(GLFWwindow *w, Input &in) {
 }
 void resetCamera(GLFWwindow *w, Input &in) {
     stopLooking(w, in);
-    *in.camera = {5.8f, 3.6f, 8.4f};
-    in.yaw = -2.14f;
-    in.pitch = -.27f;
+    *in.camera = in.homeCamera;
+    in.yaw = in.homeYaw;
+    in.pitch = in.homePitch;
     in.settings->frozen = false;
 }
 void focusCallback(GLFWwindow *w, int focused) {
@@ -581,15 +593,19 @@ int main(int argc, char **argv) {
         Buffer frameBuffer = vk.buffer(sizeof(Frame), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
         BufferCleanup frameCleanup{vk, frameBuffer};
         {
-            SourceWorld world;
+            SourceWorld world(opt.scene);
             SourceRenderer source(vk, world, frameBuffer);
             VisualVoxelizer voxelizer(vk, frameBuffer);
             VoxelRenderer renderer(vk, voxelizer);
             Hud hud(vk, renderer.pass, voxelizer.setLayout);
             Readback readback(vk, opt.verify || opt.exercise);
             Settings &s = opt.settings;
-            glm::vec3 camera(5.8f, 3.6f, 8.4f);
+            glm::vec3 camera = opt.scene == SourceScene::Garden ? glm::vec3(7.8f, 5.4f, 11.f)
+                                                               : glm::vec3(5.8f, 3.6f, 8.4f);
             Input input{&s, &hud, &camera};
+            input.homeCamera = camera;
+            input.homePitch = opt.scene == SourceScene::Garden ? -.30f : -.27f;
+            input.pitch = input.homePitch;
             glfwSetWindowUserPointer(vk.window, &input);
             glfwSetKeyCallback(vk.window, keyCallback);
             glfwSetMouseButtonCallback(vk.window, mouseButton);
@@ -969,6 +985,7 @@ int main(int argc, char **argv) {
                 f << std::setprecision(6) << "{\n  \"device\": \"" << vk.gpuName
                   << "\",\n  \"source_backend\": \"Vulkan raster G-buffer\",\n  \"frames\": "
                   << frameNumber << ",\n  \"timed_frames_after_warmup\": " << timedFrames
+                  << ",\n  \"scene\": \"" << (opt.scene == SourceScene::Garden ? "garden" : "test") << "\""
                   << ",\n  \"triangles\": " << world.triangleCount()
                   << ",\n  \"samples\": " << source.width * source.height
                   << ",\n  \"hits\": " << counts.hits

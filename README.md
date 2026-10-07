@@ -2,7 +2,7 @@
 
 A C++20/Vulkan experiment that turns **rasterized visible world positions and final source RGB** into a sparse shell of **unlit coloured cubes**. The voxel generator reads source buffers only. It has no source triangle topology, material evaluation, or post-process raycasting.
 
-The demo source happens to be 2,860 triangles. A future SDF, procedural renderer or hardware ray tracer can supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
+The default source scene is a countryside garden: rolling terrain, grass blades, a tiled-roof cottage, opaque windows, a stone path, trees, a timber fence, a flower bed and a bench. The original 2,860-triangle test scene remains available with `--scene test`. A future SDF, procedural renderer or hardware ray tracer can supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
 
 ## Build and run
 
@@ -27,6 +27,15 @@ cmake --build build-windows --config Release
 ```
 
 Run commands from the project directory containing `CMakeLists.txt`. Shader compilation is automatic. An existing configured build only needs `cmake --build build-windows --config Release` after updating the source. CI builds with Windows MSVC and verifies rendering with software Vulkan on Linux.
+
+Select a source scene; both use the same restored voxel pipeline and settings:
+
+```bat
+.\build-windows\Release\microvoxels.exe --scene garden
+.\build-windows\Release\microvoxels.exe --scene test
+```
+
+The garden is generated once from a fixed seed. All terrain, roof tiles, grass, flowers and props are ordinary source triangles; no scene mesh data is supplied to the voxel filter. **R** restores the selected scene's starting view. Source grass bending reuses the existing vertex animation. No additional passes, voxel lighting or rendering optimizations are introduced.
 
 ## Compare point and footprint splats
 
@@ -83,9 +92,9 @@ The existing XYZ buffer is reused rather than adding depth reconstruction to nor
 
 ```sh
 ctest --test-dir build --output-on-failure
-./build/microvoxels --validation --verify --exercise --frames 8 --width 480 --height 360
-./build/microvoxels --validation --verify --exercise-controls --frames 16 --width 480 --height 360
-./build/microvoxels --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
+./build/microvoxels --scene garden --validation --verify --exercise --frames 8 --width 480 --height 360
+./build/microvoxels --scene test --validation --verify --exercise-controls --frames 16 --width 480 --height 360
+./build/microvoxels --scene test --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
 ./build/microvoxels --frames 120 --time 1 --no-ui --report profile.json
 ```
 
@@ -96,3 +105,5 @@ ctest --test-dir build --output-on-failure
 Source sampling is capped at 2048 pixels per dimension. Tables are bounded; the HUD reports drops. Very fine cells, grazing angles, silhouettes, discontinuity fallback and footprint caps can still leave gaps or changing cells. Projected-size LOD is useful when source pixels cover many smaller cells.
 
 Read [the implementation notes](docs/IMPLEMENTATION.md) and [the measured comparison](docs/FOOTPRINTS.md). Opaque geometry only; transparency and temporal occupancy accumulation are not implemented.
+
+Existing measurement documents refer to the original `--scene test` fixture. Software Vulkan is used for CI correctness and preview rendering; it does not establish performance on a hardware GPU.
