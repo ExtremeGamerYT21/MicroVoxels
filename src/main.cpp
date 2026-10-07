@@ -486,7 +486,9 @@ int main(int argc, char **argv) {
                 sb.image = vk.swapImages[swapIndex];
                 sb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
                 sb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                // Match the acquire semaphore's TRANSFER wait stage so the layout
+                // transition cannot race the presentation engine's previous read.
+                vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                      &sb);
                 VkImageCopy imageCopy{};

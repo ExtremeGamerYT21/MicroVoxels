@@ -66,7 +66,9 @@ indirect command's vertex count and starting offsets, and profile reports expose
 The prototype uses one graphics/compute/present queue and one frame in flight. Render-pass dependencies make
 source colour/position writes visible to sampling; explicit barriers order clears, LOD image writes, colour
 reduction, compaction, vertex reads, indirect-command reads, and transfer/host readbacks. Presentation uses
-a semaphore per swapchain image; its reuse follows reacquisition of that image. Validation is optional and
+a semaphore per swapchain image; its reuse follows reacquisition of that image. The swapchain layout
+transition uses the transfer stage in both scopes to chain it after the acquire semaphore's transfer-stage
+wait. Validation is optional and
 fails the run if an error is reported. CI additionally enables synchronization validation for its GPU checks.
 
 Freeze skips all three generation dispatches and preserves instance/counter buffers. Source animation,
