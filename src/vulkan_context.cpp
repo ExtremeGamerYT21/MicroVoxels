@@ -101,6 +101,7 @@ VulkanContext::VulkanContext(int w, int h, bool hidden, bool validate) : validat
                     timestampBits = families[i].timestampValidBits;
                     timestampPeriod = props.limits.timestampPeriod;
                     gpuName = props.deviceName;
+                    gpuType = props.deviceType;
                 }
                 break;
             }
@@ -304,7 +305,8 @@ VkPipeline VulkanContext::compute(VkPipelineLayout layout, const std::string &na
 }
 VkPipeline VulkanContext::graphics(VkPipelineLayout layout, VkRenderPass pass,
                                    const std::string &vertex, const std::string &fragment,
-                                   int colors, bool depth, bool sourceVertex, bool hudVertex) {
+                                   int colors, bool depth, bool sourceVertex, bool hudVertex,
+                                   VkCullModeFlags cull) {
     VkShaderModule vs = shader(vertex), fs = fragment.empty() ? VK_NULL_HANDLE : shader(fragment);
     VkPipelineShaderStageCreateInfo stages[2]{};
     for (int i = 0; i < 2; i++) {
@@ -343,7 +345,7 @@ VkPipeline VulkanContext::graphics(VkPipelineLayout layout, VkRenderPass pass,
     VkPipelineRasterizationStateCreateInfo ra{
         VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     ra.polygonMode = VK_POLYGON_MODE_FILL;
-    ra.cullMode = VK_CULL_MODE_NONE;
+    ra.cullMode = cull;
     ra.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     ra.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms{

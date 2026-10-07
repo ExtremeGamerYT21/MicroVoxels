@@ -66,6 +66,8 @@ Press **T** to compare this with **point mode**, where one valid source sample e
 | Tab | Source / microvoxels / side by side |
 | F | Freeze the cloud; camera and source continue |
 | G | Separate cube-face-lighting debug pipeline |
+| I | Toggle indexed cube vertices; the frozen cloud is unchanged |
+| B | Toggle safe hardware backface culling |
 | + / - | Base voxel size |
 | [ / ] | First distance LOD boundary |
 | 1–6 | Number of nested LOD levels |
@@ -89,6 +91,13 @@ Freeze and move around to inspect the sampled shell. Newly exposed surfaces are 
 3. **VisualVoxelizer** selects world-region LOD, estimates bounded screen-derived footprints, quantizes cells and reduces RGB using exact keys.
 4. GPU count/prefix/compact passes emit instances in hash-slot order and write the indirect draw count.
 5. **VoxelRenderer** draws centre/size + RGBA instances with stored RGB directly.
+
+The cube renderer now has independently switchable indexed geometry and hardware
+backface culling. The original draw remains the default. Indexed, unculled cubes
+share eight corners; culled cubes share four corners per face and preserve exit
+faces at the near plane. See [the hardware draw experiments](docs/GPU_RENDERING.md)
+for a repeatable Windows benchmark and correctness checks. No voxel-generation
+passes, source visibility or RGB semantics change.
 
 The existing XYZ buffer is reused rather than adding depth reconstruction to normal generation. Verification independently reconstructs positions from actual Vulkan depth and inverse VP. All lighting, normals, shadows, materials and tone mapping remain in the source stage. There are no ray–box tests, second source visibility pass, triangle–cell voxelization or persistent voxel volume.
 

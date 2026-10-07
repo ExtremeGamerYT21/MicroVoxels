@@ -1,4 +1,6 @@
 #include "voxel_renderer.hpp"
+#include "cube_mesh.hpp"
+#include <cstddef>
 namespace micro {
 VoxelRenderer::VoxelRenderer(VulkanContext &context, VisualVoxelizer &v)
     : vk(context), voxelizer(v) {
@@ -9,7 +11,8 @@ VoxelRenderer::VoxelRenderer(VulkanContext &context, VisualVoxelizer &v)
         a.format = i ? VK_FORMAT_D32_SFLOAT : vk.swapFormat;
         a.samples = VK_SAMPLE_COUNT_1_BIT;
         a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        // Final depth is used only inside this pass. Source depth is unchanged.
+        a.storeOp = i ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
         a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         a.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -41,7 +44,52 @@ VoxelRenderer::VoxelRenderer(VulkanContext &context, VisualVoxelizer &v)
     check(vkCreateRenderPass(vk.device, &ci, nullptr, &pass), "voxel render pass");
     cubes = vk.graphics(v.layout, pass, "voxel.vert", "voxel.frag", 1, true);
     debugCubes = vk.graphics(v.layout, pass, "voxel_debug.vert", "voxel_debug.frag", 1, true);
+    indexedCubes = vk.graphics(v.layout, pass, "voxel_indexed.vert", "voxel.frag", 1, true);
+    indexedDebugCubes = vk.graphics(v.layout, pass, "voxel_faces_debug.vert", "voxel_debug.frag", 1, true);
+    culledCubes = vk.graphics(v.layout, pass, "voxel_faces.vert", "voxel.frag", 1, true,
+                             false, false, VK_CULL_MODE_BACK_BIT);
+    culledDebugCubes = vk.graphics(v.layout, pass, "voxel_faces_debug.vert", "voxel_debug.frag", 1, true,
+                                  false, false, VK_CULL_MODE_BACK_BIT);
     fullscreen = vk.graphics(v.layout, pass, "fullscreen.vert", "fullscreen.frag", 1, false);
+    indices = vk.buffer(sizeof(CubeCornerIndices) + sizeof(CubeFaceIndices),
+                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    indexedCommand = vk.buffer(sizeof(VkDrawIndexedIndirectCommand),
+                               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    vk.immediateBegin();
+    vkCmdUpdateBuffer(vk.cmd, indices.handle, 0, sizeof(CubeCornerIndices), CubeCornerIndices.data());
+    vkCmdUpdateBuffer(vk.cmd, indices.handle, sizeof(CubeCornerIndices), sizeof(CubeFaceIndices),
+                      CubeFaceIndices.data());
+    VkDrawIndexedIndirectCommand command{36, 0, 0, 0, 0};
+    vkCmdUpdateBuffer(vk.cmd, indexedCommand.handle, 0, sizeof(command), &command);
+    vk.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+               VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    vk.immediateEnd();
+}
+void VoxelRenderer::prepare(const Parameters &p) {
+    if (!p.footprint.w || p.flags.w == 0)
+        return;
+    // VkDrawIndirectCommand and VkDrawIndexedIndirectCommand have the same
+    // instanceCount offset. The other indexed fields are initialized once.
+    static_assert(offsetof(Counters, instanceCount) ==
+                  offsetof(VkDrawIndexedIndirectCommand, instanceCount));
+    VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = indexedCommand.handle;
+    barrier.offset = 0;
+    barrier.size = indexedCommand.size;
+    vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          0, 0, nullptr, 1, &barrier, 0, nullptr);
+    VkBufferCopy copy{offsetof(Counters, instanceCount),
+                      offsetof(VkDrawIndexedIndirectCommand, instanceCount), sizeof(uint32_t)};
+    vkCmdCopyBuffer(vk.cmd, voxelizer.counters.handle, indexedCommand.handle, 1, &copy);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                          0, 0, nullptr, 1, &barrier, 0, nullptr);
 }
 void VoxelRenderer::resize() {
     if (framebuffer)
@@ -89,8 +137,18 @@ void VoxelRenderer::draw(const Parameters &p, VkQueryPool queries) {
     if (p.flags.w == 1 || p.flags.w == 2) {
         float half = float(vk.extent.width / 2);
         vk.viewport(p.flags.w == 2 ? half : 0, 0, p.flags.w == 2 ? w - half : w, h);
-        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.flags.z ? debugCubes : cubes);
-        vkCmdDrawIndirect(vk.cmd, voxelizer.counters.handle, 0, 1, sizeof(VkDrawIndirectCommand));
+        bool indexed = p.footprint.w != 0, cull = p.footprint.z != 0, debug = p.flags.z != 0;
+        VkPipeline pipeline = cull ? (debug ? culledDebugCubes : culledCubes)
+                                   : indexed ? (debug ? indexedDebugCubes : indexedCubes)
+                                             : (debug ? debugCubes : cubes);
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        if (indexed) {
+            vkCmdBindIndexBuffer(vk.cmd, indices.handle, (cull || debug) ? sizeof(CubeCornerIndices) : 0,
+                                 VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexedIndirect(vk.cmd, indexedCommand.handle, 0, 1,
+                                      sizeof(VkDrawIndexedIndirectCommand));
+        } else
+            vkCmdDrawIndirect(vk.cmd, voxelizer.counters.handle, 0, 1, sizeof(VkDrawIndirectCommand));
     }
     if (queries)
         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 8);
@@ -103,9 +161,11 @@ VoxelRenderer::~VoxelRenderer() {
         vkDestroyFramebuffer(vk.device, framebuffer, nullptr);
     vk.destroy(output);
     vk.destroy(depth);
-    vkDestroyPipeline(vk.device, cubes, nullptr);
-    vkDestroyPipeline(vk.device, debugCubes, nullptr);
-    vkDestroyPipeline(vk.device, fullscreen, nullptr);
+    vk.destroy(indices);
+    vk.destroy(indexedCommand);
+    for (auto pipeline : {cubes, debugCubes, indexedCubes, indexedDebugCubes,
+                          culledCubes, culledDebugCubes, fullscreen})
+        vkDestroyPipeline(vk.device, pipeline, nullptr);
     vkDestroyRenderPass(vk.device, pass, nullptr);
 }
 } // namespace micro

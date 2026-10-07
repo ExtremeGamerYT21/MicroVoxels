@@ -70,7 +70,7 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
     mesh.clear();
     if (!s.visibleHud)
         return;
-    rect(8, 8, 430, 400, {.01f, .018f, .03f, .90f});
+    rect(8, 8, 430, 420, {.01f, .018f, .03f, .90f});
     text(18, 18, "MICROVOXELS - CONTINUOUS SOURCE / UNLIT CUBES", {.30f, .88f, .70f, 1});
     for (int i = 0; i < 3; i++) {
         rect(18 + 140 * i, 37, 130, 21,
@@ -122,6 +122,8 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 6
     text(18, 355, std::string("C: PROJECTED-SIZE LOD ") + (s.adaptiveLod ? "ON" : "OFF"));
     text(18, 373,
          c.hits ? "WASD QE / RIGHT MOUSE / R RESET / F1 HUD" : "NO SOURCE HITS - R: RESET VIEW");
+    text(18, 393, std::string("I: INDEXED ") + (s.indexedCubes ? "ON" : "OFF") +
+                      "   B: BACKFACE CULL " + (s.cullCubes ? "ON" : "OFF"));
     if (mesh.size() * sizeof(HudVertex) > vertices.size)
         throw std::runtime_error("HUD buffer too small");
     std::memcpy(vertices.mapped, mesh.data(), mesh.size() * sizeof(HudVertex));
@@ -152,6 +154,12 @@ void Hud::click(double x, double y, Settings &s) {
         s.footprintSplats = !s.footprintSplats;
     if (y >= 351 && y <= 369 && x >= 18 && x <= 430)
         s.adaptiveLod = !s.adaptiveLod;
+    if (y >= 389 && y <= 406 && x >= 18 && x <= 430) {
+        if (x < 208)
+            s.indexedCubes = !s.indexedCubes;
+        else
+            s.cullCubes = !s.cullCubes;
+    }
     if (x >= 208 && x <= 418) {
         if (y >= 89 && y <= 107)
             s.base = .005f + .145f * float((x - 208) / 210);

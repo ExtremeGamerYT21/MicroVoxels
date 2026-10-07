@@ -19,7 +19,8 @@ using namespace micro;
 struct Options {
     int width = 1100, height = 720, frames = 0;
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
-         exerciseControls = false, exerciseStability = false;
+         exerciseControls = false, exerciseStability = false, exerciseRender = false;
+    int freezeAfter = -1;
     float fixedTime = -1;
     SourceScene scene = SourceScene::Garden;
     std::string screenshot, report, captureSequence;
@@ -60,7 +61,21 @@ Options parse(int argc, char **argv) {
             o.exerciseControls = true;
         else if (a == "--exercise-stability")
             o.exerciseStability = true;
-        else if (a == "--sample-occupancy" || a == "--point-splats")
+        else if (a == "--exercise-render")
+            o.exerciseRender = true;
+        else if (a == "--freeze-after")
+            o.freezeAfter = std::stoi(value());
+        else if (a == "--cube-mesh") {
+            auto mesh = value();
+            if (mesh != "legacy" && mesh != "indexed")
+                throw std::runtime_error("Use --cube-mesh legacy|indexed");
+            o.settings.indexedCubes = mesh == "indexed";
+        } else if (a == "--cube-culling") {
+            auto cull = value();
+            if (cull != "off" && cull != "back")
+                throw std::runtime_error("Use --cube-culling off|back");
+            o.settings.cullCubes = cull == "back";
+        } else if (a == "--sample-occupancy" || a == "--point-splats")
             o.settings.footprintSplats = false;
         else if (a == "--footprint-splats")
             o.settings.footprintSplats = true;
@@ -108,10 +123,12 @@ Options parse(int argc, char **argv) {
                    "1..64\n"
                 << "--capture-sequence DIRECTORY --no-adaptive-lod --exercise-controls (16 frames) "
                    "--exercise-stability (12 frames)\n"
+                << "--cube-mesh legacy|indexed --cube-culling off|back (defaults: legacy/off)\n"
+                << "--freeze-after N (finite-run draw benchmark) --exercise-render (19 frames)\n"
                 << "WASD/QE fly; right mouse look; Tab view; F freeze; G cube-light debug;\n"
                 << "O average/closest; X supersampling; H lighting; P pause; +/- voxel size;\n"
                 << "[/] LOD distance; 1..6 LOD count; R reset view; C adaptive LOD; F1 HUD; Esc "
-                   "exit; T point/footprint splats.\n";
+                   "exit; T point/footprint splats; I indexed cubes; B safe backface culling.\n";
             std::exit(0);
         } else
             throw std::runtime_error("Unknown option: " + a);
@@ -136,6 +153,16 @@ Options parse(int argc, char **argv) {
         o.verify = true;
         o.fixedTime = 1;
     }
+    if (o.exerciseRender) {
+        if (o.frames < 19 || o.exercise || o.exerciseControls || o.exerciseStability)
+            throw std::runtime_error("--exercise-render needs 19 frames and no other exercise");
+        o.verify = true;
+        o.fixedTime = 1;
+    }
+    if (o.freezeAfter < -1 || (o.freezeAfter >= 0 &&
+        (o.frames <= o.freezeAfter || o.exercise || o.exerciseControls ||
+         o.exerciseStability || o.exerciseRender)))
+        throw std::runtime_error("--freeze-after needs more frames than N and no exercise");
     o.settings.visibleHud = !o.noUi;
     return o;
 }
@@ -186,6 +213,10 @@ void keyCallback(GLFWwindow *w, int key, int, int action, int) {
         s.frozen = !s.frozen;
     if (key == GLFW_KEY_G)
         s.cubeLight = !s.cubeLight;
+    if (key == GLFW_KEY_I)
+        s.indexedCubes = !s.indexedCubes;
+    if (key == GLFW_KEY_B)
+        s.cullCubes = !s.cullCubes;
     if (key == GLFW_KEY_O)
         s.average = !s.average;
     if (key == GLFW_KEY_X)
@@ -629,6 +660,8 @@ int main(int argc, char **argv) {
             std::vector<Voxel> frozenSnapshot;
             Counters frozenCounts{};
             int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0, stabilityChecks = 0;
+            int renderFreezeChecks = 0;
+            Voxel renderProbe{};
             uint64_t motionAdded = 0, motionRemoved = 0;
             float reconstructionError = 0;
             std::map<Cell, glm::vec4> stableCells;
@@ -642,6 +675,22 @@ int main(int argc, char **argv) {
                 glfwPollEvents();
                 if (opt.exerciseControls && frameNumber < 16)
                     exerciseControls(frameNumber, vk.window, input);
+                if (opt.freezeAfter >= 0 && frameNumber >= opt.freezeAfter)
+                    s.frozen = true;
+                if (opt.exerciseRender && frameNumber > 0) {
+                    s.frozen = true;
+                    const glm::vec3 axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+                                               {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+                    glm::vec3 axis = glm::normalize(axes[(frameNumber - 1) % 6] +
+                                                    glm::vec3(.013f, .017f, .019f));
+                    float size = renderProbe.centerSize.w;
+                    float distance = frameNumber <= 6 ? size * .5f + .1f
+                                     : frameNumber <= 12 ? size * .5f + .025f : size * .1f;
+                    camera = glm::vec3(renderProbe.centerSize) + axis * distance;
+                    glm::vec3 direction = -axis;
+                    input.yaw = std::atan2(direction.z, direction.x);
+                    input.pitch = std::asin(direction.y);
+                }
                 if (opt.exerciseStability && frameNumber < 12) {
                     s.frozen = false;
                     s.levels = 1;
@@ -748,7 +797,8 @@ int main(int argc, char **argv) {
                                      int(VisualVoxelizer::Capacity)};
                 parameters.config = {s.base, s.distance, .1f, s.splat};
                 parameters.flags = {s.levels, s.average ? 1 : 0, s.cubeLight ? 1 : 0, s.mode};
-                parameters.footprint = {s.footprintRadius, s.footprintLimit, 0, 0};
+                parameters.footprint = {s.footprintRadius, s.footprintLimit,
+                                        s.cullCubes ? 1 : 0, s.indexedCubes ? 1 : 0};
                 bool generating = !s.frozen || !voxelizer.cloudReady;
                 bool referenceReset = voxelizer.resetHistory;
                 if (referenceReset)
@@ -779,6 +829,7 @@ int main(int argc, char **argv) {
                     for (uint32_t i = 2; i <= 4; i++)
                         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries,
                                             i);
+                renderer.prepare(parameters);
                 renderer.begin(parameters);
                 renderer.draw(parameters, queries);
                 if (queries)
@@ -873,7 +924,9 @@ int main(int argc, char **argv) {
                             double((stamps[i + 1] - stamps[i]) & mask) * vk.timestampPeriod / 1e6;
                     cubeDrawTime =
                         double((stamps[8] - stamps[7]) & mask) * vk.timestampPeriod / 1e6;
-                    if (frameNumber >= 2 && generating) {
+                    bool timed = opt.freezeAfter >= 0
+                                     ? frameNumber >= opt.freezeAfter && s.frozen : generating;
+                    if (frameNumber >= 2 && timed) {
                         for (int i = 0; i < 6; i++)
                             totals[i] += times[i];
                         cubeDrawTotal += cubeDrawTime;
@@ -889,6 +942,28 @@ int main(int argc, char **argv) {
                 if (opt.verify && generating) {
                     verify(parameters, frame, readback, counts, history, reconstructionError);
                     verifiedFrames++;
+                }
+                if (opt.exerciseRender) {
+                    auto *data = static_cast<const Voxel *>(readback.instances.mapped);
+                    if (frameNumber == 0) {
+                        if (!counts.instanceCount)
+                            throw std::runtime_error("Render exercise needs a nonempty cloud");
+                        frozenSnapshot.assign(data, data + counts.instanceCount);
+                        frozenCounts = counts;
+                        for (uint32_t i = 0; i < counts.instanceCount; ++i)
+                            if (data[i].centerSize.w > renderProbe.centerSize.w ||
+                                (data[i].centerSize.w == renderProbe.centerSize.w &&
+                                 data[i].centerSize.y > renderProbe.centerSize.y))
+                                renderProbe = data[i];
+                        if (renderProbe.centerSize.w < .1f)
+                            throw std::runtime_error("Render exercise needs a cube >= .1 m; "
+                                                     "use --voxel-size .12 --levels 1");
+                    } else {
+                        if (std::memcmp(&counts, &frozenCounts, sizeof(counts)) ||
+                            std::memcmp(data, frozenSnapshot.data(), frozenSnapshot.size() * sizeof(Voxel)))
+                            throw std::runtime_error("Render exercise changed the frozen cloud");
+                        ++renderFreezeChecks;
+                    }
                 }
                 if (opt.exerciseStability && frameNumber < 12) {
                     if (!generating)
@@ -964,6 +1039,9 @@ int main(int argc, char **argv) {
             if (opt.exerciseControls)
                 std::cout << "Camera reset, mouse capture/focus, settings and resize checks: "
                           << controlChecks << '\n';
+            if (opt.exerciseRender)
+                std::cout << "Frozen cube render checks: " << renderFreezeChecks
+                          << " (six outside, six near-plane, six inside views)\n";
             if (opt.exerciseStability)
                 std::cout << "Static-camera checks: " << stabilityChecks
                           << "; moving floor patch: " << motionAdded << " cell additions, "
@@ -986,6 +1064,20 @@ int main(int argc, char **argv) {
                   << "\",\n  \"source_backend\": \"Vulkan raster G-buffer\",\n  \"frames\": "
                   << frameNumber << ",\n  \"timed_frames_after_warmup\": " << timedFrames
                   << ",\n  \"scene\": \"" << (opt.scene == SourceScene::Garden ? "garden" : "test") << "\""
+                  << ",\n  \"device_type\": \""
+                  << (vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "cpu"
+                      : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete"
+                      : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" : "other") << "\""
+                  << ",\n  \"cube_mesh\": \"" << (s.indexedCubes ? "indexed" : "legacy") << "\""
+                  << ",\n  \"cube_backface_culling\": " << (s.cullCubes ? "true" : "false")
+                  << ",\n  \"cube_distinct_vertex_ids\": "
+                  << (s.indexedCubes ? (s.cullCubes || s.cubeLight ? 24 : 8) : 36)
+                  << ",\n  \"instance_bytes_per_voxel\": " << sizeof(Voxel)
+                  << ",\n  \"used_instance_bytes\": " << uint64_t(counts.instanceCount) * sizeof(Voxel)
+                  << ",\n  \"allocated_instance_bytes\": " << voxelizer.instances.size
+                  << ",\n  \"freeze_after\": " << opt.freezeAfter
+                  << ",\n  \"timing_scope\": \"" << (opt.freezeAfter >= 0 ? "frozen" : "generating") << "\""
+                  << ",\n  \"render_freeze_checks\": " << renderFreezeChecks
                   << ",\n  \"triangles\": " << world.triangleCount()
                   << ",\n  \"samples\": " << source.width * source.height
                   << ",\n  \"hits\": " << counts.hits

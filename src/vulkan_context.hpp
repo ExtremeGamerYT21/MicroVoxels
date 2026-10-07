@@ -46,6 +46,7 @@ class VulkanContext {
     uint32_t queueFamily{}, timestampBits{};
     float timestampPeriod{};
     std::string gpuName;
+    VkPhysicalDeviceType gpuType{};
     uint32_t validationErrors{};
     VkCommandPool pool{};
     VkCommandBuffer cmd{};
@@ -71,7 +72,8 @@ class VulkanContext {
     VkPipeline compute(VkPipelineLayout layout, const std::string &name);
     VkPipeline graphics(VkPipelineLayout layout, VkRenderPass pass, const std::string &vertex,
                         const std::string &fragment, int colorCount, bool depth,
-                        bool sourceVertex = false, bool hudVertex = false);
+                        bool sourceVertex = false, bool hudVertex = false,
+                        VkCullModeFlags cull = VK_CULL_MODE_NONE);
     VkPipelineLayout pipelineLayout(VkDescriptorSetLayout set);
     VkDescriptorSet allocate(VkDescriptorSetLayout layout);
     void resizeSwapchain();

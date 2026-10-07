@@ -47,6 +47,31 @@ jobs:
           path: |
             captures/*.json
             captures/garden.ppm
+      - name: Compare hardware draw paths, near planes and frozen interiors
+        env:
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        run: |
+          export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
+          for scene in test garden; do
+            for config in legacy-off indexed-off legacy-back indexed-back; do
+              mesh=${config%-*}
+              cull=${config#*-}
+              name=captures/render-${scene}-${config}
+              xvfb-run -a ./build/microvoxels --scene "$scene" --cube-mesh "$mesh" --cube-culling "$cull" --hidden --validation --exercise-render --frames 19 --width 320 --height 240 --voxel-size .12 --levels 1 --no-adaptive-lod --no-ui --capture-sequence "$name" --report "$name.json"
+            done
+            for config in indexed-off legacy-back indexed-back; do
+              exact=()
+              if [ "$config" = indexed-off ]; then exact=(--exact); fi
+              python3 tests/cube_render_comparison.py captures/render-${scene}-legacy-off captures/render-${scene}-${config} captures/render-${scene}-${config}-comparison.json "${exact[@]}"
+            done
+          done
+          xvfb-run -a ./build/microvoxels --scene test --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --report captures/indexed-controls.json
+          xvfb-run -a ./build/microvoxels --scene garden --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/indexed-exercise.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cube-render-verification
+          path: captures/render-*
   windows-msvc:
     runs-on: windows-2022
     steps:
@@ -66,3 +91,11 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Grid tests
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Validate Windows benchmark command
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'tools/benchmark_voxel_draw.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { $errors | Format-List; throw 'Benchmark PowerShell syntax failed' }
