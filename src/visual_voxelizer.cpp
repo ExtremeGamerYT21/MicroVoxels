@@ -9,13 +9,20 @@ VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform)
                              VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     instances = vk.buffer(Capacity * sizeof(Voxel),
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    cachedInstances =
+        vk.buffer(CacheCapacity * sizeof(Voxel),
+                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    cachedSeen = vk.buffer(CacheCapacity * sizeof(float),
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    lastSeen = vk.buffer(CacheCapacity * sizeof(float),
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     for (auto &r : roots)
-        r = vk.buffer(RootCapacity * 8ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                               VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        r = vk.buffer(RootCapacity * 12ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     compactGroups = vk.buffer(Capacity / 256 * 4ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (uint32_t i = 0; i <= 11; i++) {
+    for (uint32_t i = 0; i <= 14; i++) {
         VkDescriptorType t = i == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                     : (i == 4 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                               : ((i == 1 || i == 2 || i == 3 || i == 7)
@@ -34,6 +41,7 @@ VisualVoxelizer::VisualVoxelizer(VulkanContext &context, Buffer &uniform)
     lodPipeline = vk.compute(layout, "lod.comp");
     resolveLodPipeline = vk.compute(layout, "lod_resolve.comp");
     hashPipeline = vk.compute(layout, "voxelize.comp");
+    cachePipeline = vk.compute(layout, "voxel_cache.comp");
     compactPipeline = vk.compute(layout, "compact.comp");
     compactCountsPipeline = vk.compute(layout, "compact_counts.comp");
     compactPrefixPipeline = vk.compute(layout, "compact_prefix.comp");
@@ -46,9 +54,9 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     }
     for (int i = 0; i < 2; i++) {
-        VkDescriptorBufferInfo bufferInfo[12]{};
-        VkDescriptorImageInfo imageInfo[12]{};
-        VkWriteDescriptorSet writes[12]{};
+        VkDescriptorBufferInfo bufferInfo[15]{};
+        VkDescriptorImageInfo imageInfo[15]{};
+        VkWriteDescriptorSet writes[15]{};
         bufferInfo[0] = {frame.handle, 0, sizeof(Frame)};
         bufferInfo[5] = {roots[i].handle, 0, roots[i].size};
         bufferInfo[6] = {roots[1 - i].handle, 0, roots[1 - i].size};
@@ -56,6 +64,9 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
         bufferInfo[9] = {counters.handle, 0, counters.size};
         bufferInfo[10] = {instances.handle, 0, instances.size};
         bufferInfo[11] = {compactGroups.handle, 0, compactGroups.size};
+        bufferInfo[12] = {cachedInstances.handle, 0, cachedInstances.size};
+        bufferInfo[13] = {cachedSeen.handle, 0, cachedSeen.size};
+        bufferInfo[14] = {lastSeen.handle, 0, lastSeen.size};
         imageInfo[1] = {vk.sampler, source.positions[i].view,
                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         imageInfo[2] = {vk.sampler, source.positions[1 - i].view,
@@ -63,13 +74,13 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
         imageInfo[3] = {vk.sampler, lods[1 - i].view, VK_IMAGE_LAYOUT_GENERAL};
         imageInfo[4] = {VK_NULL_HANDLE, lods[i].view, VK_IMAGE_LAYOUT_GENERAL};
         imageInfo[7] = {vk.sampler, source.color.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        for (uint32_t b = 0; b <= 11; b++) {
+        for (uint32_t b = 0; b <= 14; b++) {
             auto &w = writes[b];
             w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w.dstSet = sets[i];
             w.dstBinding = b;
             w.descriptorCount = 1;
-            if (b == 0 || b == 5 || b == 6 || (b >= 8 && b <= 11)) {
+            if (b == 0 || b == 5 || b == 6 || b >= 8) {
                 w.descriptorType =
                     b == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 w.pBufferInfo = &bufferInfo[b];
@@ -79,7 +90,7 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
                 w.pImageInfo = &imageInfo[b];
             }
         }
-        vkUpdateDescriptorSets(vk.device, 12, writes, 0, nullptr);
+        vkUpdateDescriptorSets(vk.device, 15, writes, 0, nullptr);
     }
     vk.immediateBegin();
     for (auto &l : lods)
@@ -93,11 +104,20 @@ void VisualVoxelizer::resize(const SurfaceSamples &source) {
     vk.immediateEnd();
     current = 0;
     resetHistory = true;
+    resetCache = true;
+    cacheReady = false;
 }
 void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
     vk.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-               VK_ACCESS_TRANSFER_WRITE_BIT);
+               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    uint32_t previousCount = uint32_t(p.cache.z);
+    if (previousCount) {
+        VkBufferCopy copy{0, 0, previousCount * sizeof(Voxel)};
+        vkCmdCopyBuffer(vk.cmd, instances.handle, cachedInstances.handle, 1, &copy);
+        copy.size = previousCount * sizeof(float);
+        vkCmdCopyBuffer(vk.cmd, lastSeen.handle, cachedSeen.handle, 1, &copy);
+    }
     vkCmdFillBuffer(vk.cmd, slots.handle, 0, slots.size, 0);
     // Initialize the whole indirect command and statistics in one transfer. A fill
     // followed by an unsynchronized partial update can clear vertexCount again.
@@ -131,6 +151,17 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     if (q)
         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 3);
+    if (q)
+        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 9);
+    if (previousCount) {
+        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cachePipeline);
+        vkCmdDispatch(vk.cmd, (previousCount + 255u) / 256u, 1, 1);
+        vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    }
+    if (q)
+        vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 10);
     vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compactCountsPipeline);
     vkCmdDispatch(vk.cmd, Capacity / 256, 1, 1);
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -150,6 +181,8 @@ void VisualVoxelizer::generate(const Parameters &p, VkQueryPool q) {
     if (q)
         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, 4);
     cloudReady = true;
+    resetCache = false;
+    cacheReady = p.cache.y > 0;
 }
 VisualVoxelizer::~VisualVoxelizer() {
     for (auto &i : lods)
@@ -160,8 +193,11 @@ VisualVoxelizer::~VisualVoxelizer() {
     vk.destroy(counters);
     vk.destroy(instances);
     vk.destroy(compactGroups);
+    vk.destroy(cachedInstances);
+    vk.destroy(cachedSeen);
+    vk.destroy(lastSeen);
     for (auto p : {lodPipeline, resolveLodPipeline, hashPipeline, compactPipeline,
-                   compactCountsPipeline, compactPrefixPipeline})
+                   compactCountsPipeline, compactPrefixPipeline, cachePipeline})
         vkDestroyPipeline(vk.device, p, nullptr);
     vkDestroyPipelineLayout(vk.device, layout, nullptr);
     vkFreeDescriptorSets(vk.device, vk.descriptorPool, 2, sets.data());

@@ -22,6 +22,7 @@ void main() {
     ivec3 root = rootCell(hit.xyz);
     float d = distance(rootCenter(root), frame.cameraTime.xyz);
     int old = -1;
+    uint lastChangeMs = 0u;
     uint slot = hashKey(ivec4(root, 0)) & (ROOT_CAPACITY - 1);
     for (uint i = 0; i < 64; i++) {
         Root previous = previousRoots[(slot + i) & (ROOT_CAPACITY - 1)];
@@ -31,6 +32,7 @@ void main() {
         ivec2 q = pixel(id - 1);
         if (all(equal(rootCell(texelFetch(previousPositions, q, 0).xyz), root))) {
             old = int(previous.lod);
+            lastChangeMs = previous.lastChangeMs;
             break;
         }
     }
@@ -41,6 +43,11 @@ void main() {
         float footprint = 1.25 * max(span.x, max(span.y, span.z));
         lod = max(lod, coverageLod(footprint, old));
     }
+    // Briefly hold a region's settled pitch so aliased grass derivatives cannot
+    // toggle its entire cell grid every frame. Every sample uses the same timer.
+    if (params.cache.y > 0 && params.cache.w != 0 && old >= 0 &&
+        uint(params.cache.x * 1000) - lastChangeMs < uint(params.cache.y * 1000))
+        lod = old;
     uint id = uint(p.y * params.extent.x + p.x) + 1;
     for (uint i = 0; i < 64; i++) {
         uint s = (slot + i) & (ROOT_CAPACITY - 1);

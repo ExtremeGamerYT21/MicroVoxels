@@ -7,20 +7,21 @@
 layout(local_size_x = 256) in;
 layout(set = 0, binding = 7) uniform sampler2D colors;
 layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
+#include "voxel_history.glsl"
 struct Slot {
     uint owner, r, g, b, count, nearest;
 };
 layout(set = 0, binding = 8, std430) readonly buffer Hash {
     Slot slots[];
 };
-struct Voxel {
-    vec4 centerSize, rgba;
-};
 layout(set = 0, binding = 10, std430) writeonly buffer Instances {
     Voxel voxels[];
 };
 layout(set = 0, binding = 11, std430) readonly buffer Groups {
     uint offsets[];
+};
+layout(set = 0, binding = 14, std430) writeonly buffer LastSeen {
+    float lastSeen[];
 };
 shared uint scan[256];
 void main() {
@@ -36,15 +37,24 @@ void main() {
     }
     if (!valid)
         return;
-    ivec2 p = ownerPixel(slots[s].owner);
-    ivec4 key = voxelKey(texelFetch(positions, p, 0).xyz, imageLoad(lods, p).r);
-    key.xyz += ownerOffset(slots[s].owner);
+    uint owner = slots[s].owner;
+    ivec4 key = resolvedKey(owner);
     uint lod = uint(key.w), idx = offsets[gl_WorkGroupID.x] + scan[local] - 1u;
     float h = params.config.x * exp2(float(lod));
+    if ((owner & CACHE_OWNER) != 0u) {
+        uint previous = owner & ~CACHE_OWNER;
+        voxels[idx] = cachedVoxels[previous];
+        if (idx < CACHE_CAPACITY)
+            lastSeen[idx] = cachedSeen[previous]; // never extend age without a fresh exact-cell hit
+        atomicAdd(perLod[lod], 1u);
+        return;
+    }
     vec3 rgb = params.flags.y == 1
                    ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
                    : texelFetch(colors, ownerPixel(slots[s].nearest), 0).rgb;
     voxels[idx].centerSize = vec4((vec3(key.xyz) + .5) * h, h * params.config.w);
     voxels[idx].rgba = vec4(rgb, 1);
+    if (params.cache.y > 0 && idx < CACHE_CAPACITY)
+        lastSeen[idx] = params.cache.x;
     atomicAdd(perLod[lod], 1u);
 }

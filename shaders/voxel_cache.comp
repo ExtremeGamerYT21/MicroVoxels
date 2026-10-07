@@ -1,0 +1,95 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "counters.glsl"
+#include "lattice.glsl"
+#include "surface_footprint.glsl"
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
+#include "voxel_history.glsl"
+layout(set = 0, binding = 5, std430) readonly buffer CurrentRoots {
+    Root currentRoots[];
+};
+struct Slot {
+    uint owner, r, g, b, count, nearest;
+};
+layout(set = 0, binding = 8, std430) buffer Hash {
+    Slot slots[];
+};
+bool currentLod(ivec4 key) {
+    if (params.flags.x == 1)
+        return key.w == 0;
+    ivec3 root = ivec3(floor(vec3(key.xyz) / exp2(float(params.flags.x - 1 - key.w))));
+    uint slot = hashKey(ivec4(root, 0)) & (ROOT_CAPACITY - 1u);
+    for (uint i = 0u; i < 64u; i++) {
+        Root entry = currentRoots[(slot + i) & (ROOT_CAPACITY - 1u)];
+        if (entry.owner == 0u)
+            return false;
+        if (all(equal(rootCell(texelFetch(positions, pixel(entry.owner - 1u), 0).xyz), root)))
+            return entry.lod == uint(key.w);
+    }
+    return false;
+}
+bool supported(vec3 center, float pitch) {
+    vec4 clip = frame.viewProjection * vec4(center, 1);
+    if (clip.w <= 0)
+        return false;
+    vec3 ndc = clip.xyz / clip.w;
+    if (any(lessThan(ndc, vec3(-1, -1, 0))) || any(greaterThan(ndc, vec3(1))))
+        return false;
+    ivec2 p = ivec2(floor((ndc.xy * .5 + .5) * vec2(params.extent.xy)));
+    // Quantization can move the projected cell center several pixels away from
+    // its supporting sample. Bound this lookup to 7x7, still requiring the hit
+    // to touch the world cell with only a 0.15-cell sampling allowance.
+    for (int y = -3; y <= 3; y++)
+        for (int x = -3; x <= 3; x++) {
+            ivec2 q = p + ivec2(x, y);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, params.extent.xy)))
+                continue;
+            vec4 hit = texelFetch(positions, q, 0);
+            if (hit.w != 0 && all(lessThanEqual(abs(hit.xyz - center), vec3(.65 * pitch))))
+                return true;
+        }
+    return false;
+}
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= uint(params.cache.z))
+        return;
+    ivec4 key = cachedKey(index);
+    uint slot = hashKey(key) & uint(params.extent.z - 1);
+    // Current-frame samples win. History never enters their RGB reduction.
+    for (uint probe = 0u; probe < 96u; probe++) {
+        uint owner = atomicAdd(slots[(slot + probe) & uint(params.extent.z - 1)].owner, 0u);
+        if (owner == 0u)
+            break;
+        if (all(equal(resolvedKey(owner), key)))
+            return;
+    }
+    if (params.cache.x - cachedSeen[index] > params.cache.y) {
+        atomicAdd(cacheExpired, 1u);
+        return;
+    }
+    Voxel v = cachedVoxels[index];
+    float pitch = params.config.x * exp2(float(key.w));
+    if (!currentLod(key)) {
+        atomicAdd(cacheLodRejected, 1u);
+        atomicAdd(cacheRejected, 1u);
+        return;
+    }
+    if (!supported(v.centerSize.xyz, pitch)) {
+        atomicAdd(cacheRejected, 1u);
+        return;
+    }
+    for (uint probe = 0u; probe < 96u; probe++) {
+        uint s = (slot + probe) & uint(params.extent.z - 1);
+        uint owner = atomicCompSwap(slots[s].owner, 0u, CACHE_OWNER | index);
+        if (owner == 0u) {
+            atomicAdd(cacheRetained, 1u);
+            return;
+        }
+        if (all(equal(resolvedKey(owner), key)))
+            return;
+    }
+    atomicAdd(cacheDropped, 1u);
+}

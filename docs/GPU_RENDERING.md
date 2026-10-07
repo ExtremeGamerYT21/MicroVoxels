@@ -1,9 +1,10 @@
 # Cube draw hardware experiments
 
-The generator, source buffers, world grid, LOD, ordered compaction, RGB reduction,
-32-byte instances and unlit fragment shader are unchanged. This change targets
-the final graphics draw. Legacy two-sided rendering remains the default until
-measurements on the target GPU justify selecting another path.
+These draw paths share the same generator, source buffers, world grid, ordered
+compaction, RGB reduction, 32-byte instances and unlit fragment shader. The
+independent [voxel cache](VOXEL_CACHE.md) can be toggled with K. Legacy two-sided
+rendering remains the default until measurements on the target GPU justify
+selecting another path.
 
 ## Draw paths
 

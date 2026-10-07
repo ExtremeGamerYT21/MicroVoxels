@@ -5,8 +5,12 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 1) uniform sampler2D positions;
 layout(set = 0, binding = 4, r32ui) uniform writeonly uimage2D currentLods;
-layout(set = 0, binding = 5, std430) readonly buffer CurrentRoots {
+layout(set = 0, binding = 2) uniform sampler2D previousPositions;
+layout(set = 0, binding = 5, std430) buffer CurrentRoots {
     Root currentRoots[];
+};
+layout(set = 0, binding = 6, std430) readonly buffer PreviousRoots {
+    Root previousRoots[];
 };
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -20,11 +24,28 @@ void main() {
         // Saturated metadata falls back consistently to the coarsest level.
         lod = uint(params.flags.x - 1);
         for (uint i = 0; i < 64; i++) {
-            Root region = currentRoots[(slot + i) & (ROOT_CAPACITY - 1)];
-            if (region.owner == 0)
+            uint s = (slot + i) & (ROOT_CAPACITY - 1);
+            uint owner = currentRoots[s].owner;
+            if (owner == 0)
                 break;
-            if (all(equal(rootCell(texelFetch(positions, pixel(region.owner - 1), 0).xyz), root))) {
-                lod = region.lod;
+            if (all(equal(rootCell(texelFetch(positions, pixel(owner - 1), 0).xyz), root))) {
+                lod = currentRoots[s].lod;
+                // Only the owning source pixel writes region metadata. Other
+                // pixels read owner/lod, never the time field, during this pass.
+                if (owner == uint(p.y * params.extent.x + p.x) + 1u) {
+                    uint changed = uint(params.cache.x * 1000);
+                    for (uint j = 0u; j < 64u; j++) {
+                        Root old = previousRoots[(slot + j) & (ROOT_CAPACITY - 1u)];
+                        if (old.owner == 0u)
+                            break;
+                        if (all(equal(rootCell(texelFetch(previousPositions, pixel(old.owner - 1u), 0).xyz), root))) {
+                            if (old.lod == lod)
+                                changed = old.lastChangeMs;
+                            break;
+                        }
+                    }
+                    currentRoots[s].lastChangeMs = changed;
+                }
                 break;
             }
         }

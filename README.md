@@ -51,7 +51,26 @@ Select a source scene; both use the same restored voxel pipeline and settings:
 .\build-windows\Release\microvoxels.exe --scene test
 ```
 
-The garden is generated once from a fixed seed. All terrain, roof tiles, grass, flowers and props are ordinary source triangles; no scene mesh data is supplied to the voxel filter. **R** restores the selected scene's starting view. Source grass bending reuses the existing vertex animation. No additional passes, voxel lighting or rendering optimizations are introduced.
+The garden is generated once from a fixed seed. All terrain, roof tiles, grass, flowers and props are ordinary source triangles; no scene mesh data is supplied to the voxel filter. **R** restores the selected scene's starting view. Source grass bending reuses the existing vertex animation and source passes.
+
+## Stabilize intermittent cubes
+
+A bounded voxel cache is enabled by default with a **100 ms** hold time. Press
+**K** to compare it with rebuilding only from the current source samples. A missing
+cell can persist briefly when a bounded source neighborhood still supports
+its world position and the region keeps the same LOD. Fresh exact-cell samples
+always replace its color; cached samples never change the current RGB reduction.
+The same short hold also limits rapid changes of each world region's LOD.
+
+```bat
+.\build-windows\Release\microvoxels.exe --no-vsync --cache-ms 100
+.\build-windows\Release\microvoxels.exe --no-vsync --no-voxel-cache
+```
+
+This reduces sample-driven disappearance. Wind still moves grass through the
+world grid; full stability for moving geometry would require freezing it. **P**
+pauses source animation and **F** freezes the entire cloud. Longer holds, up to
+500 ms, can retain more motion history. See [cache behavior and measurements](docs/VOXEL_CACHE.md).
 
 ## Compare point and footprint splats
 
@@ -80,6 +99,7 @@ Press **T** to compare this with **point mode**, where one valid source sample e
 | G | Separate cube-face-lighting debug pipeline |
 | I | Toggle indexed cube vertices; the frozen cloud is unchanged |
 | B | Toggle safe hardware backface culling |
+| K | Toggle bounded voxel persistence |
 | + / - | Base voxel size |
 | [ / ] | First distance LOD boundary |
 | 1–6 | Number of nested LOD levels |
@@ -101,8 +121,9 @@ Freeze and move around to inspect the sampled shell. Newly exposed surfaces are 
 1. **SourceRenderer** renders opaque visibility, depth, cached world XYZ and final shaded RGB.
 2. **SurfaceSamples** exposes only visible world positions and final RGB, with one previous position image for LOD history.
 3. **VisualVoxelizer** selects world-region LOD, estimates bounded screen-derived footprints, quantizes cells and reduces RGB using exact keys.
-4. GPU count/prefix/compact passes emit instances in hash-slot order and write the indirect draw count.
-5. **VoxelRenderer** draws centre/size + RGBA instances with stored RGB directly.
+4. An optional GPU cache merge retains briefly missing cells with current source support and compatible region LOD.
+5. GPU count/prefix/compact passes emit instances in hash-slot order and write the indirect draw count.
+6. **VoxelRenderer** draws centre/size + RGBA instances with stored RGB directly.
 
 The cube renderer now has independently switchable indexed geometry and hardware
 backface culling. The original draw remains the default. Indexed, unculled cubes
@@ -121,9 +142,10 @@ ctest --test-dir build --output-on-failure
 ./build/microvoxels --scene test --validation --verify --exercise-controls --frames 16 --width 480 --height 360
 ./build/microvoxels --scene test --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
 ./build/microvoxels --frames 120 --time 1 --no-ui --no-vsync --report profile.json
+./build/microvoxels --scene garden --exercise-cache --frames 43 --width 480 --height 360 --no-ui --report cache.json
 ```
 
-`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.
+`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. It also checks retained-cell support, unchanged stored RGB, and expiration against a CPU history reference. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.
 
 `--exercise` checks byte-identical frozen buffers across camera motion, then average/closest RGB and cube-light debug. `--exercise-controls` checks camera loss/reset, mouse capture/focus, empty freeze recovery, settings, mode switches and resize. `--exercise-stability` uses three stationary frames followed by nine small camera movements, with fixed source time, albedo lighting and one LOD. It verifies identical stationary cell/RGB sets and records turnover in a static floor patch. `tests/footprint_comparison.py` checks exact stationary RGB screenshots and measures matched motion silhouettes/coverage.
 

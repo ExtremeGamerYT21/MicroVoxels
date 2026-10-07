@@ -5,10 +5,12 @@ class VisualVoxelizer {
     VulkanContext &vk;
     Buffer &frame;
     VkPipeline lodPipeline{}, resolveLodPipeline{}, hashPipeline{}, compactPipeline{},
-        compactCountsPipeline{}, compactPrefixPipeline{};
+        compactCountsPipeline{}, compactPrefixPipeline{}, cachePipeline{};
+    Buffer cachedInstances, cachedSeen, lastSeen;
 
   public:
     static constexpr uint32_t Capacity = 1 << 21, RootCapacity = 1 << 18;
+    static constexpr uint32_t CacheCapacity = 1 << 18;
     Buffer slots, counters, instances, compactGroups;
     std::array<Buffer, 2> roots;
     std::array<Image, 2> lods;
@@ -16,6 +18,7 @@ class VisualVoxelizer {
     VkPipelineLayout layout{};
     std::array<VkDescriptorSet, 2> sets{};
     bool resetHistory = true, cloudReady = false;
+    bool resetCache = true, cacheReady = false;
     int current = 0;
     VisualVoxelizer(VulkanContext &vk, Buffer &frame);
     ~VisualVoxelizer();

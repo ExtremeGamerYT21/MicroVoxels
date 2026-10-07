@@ -2,6 +2,7 @@ const uint ROOT_CAPACITY = 262144u;
 struct Root {
     uint owner;
     uint lod;
+    uint lastChangeMs;
 };
 uint hashKey(ivec4 k) {
     uvec4 v = uvec4(k) * uvec4(73856093u, 19349663u, 83492791u, 2654435761u);

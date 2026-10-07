@@ -31,8 +31,10 @@ struct Counters {
         candidateWrites;
     uint32_t perLod[8];
     uint32_t maxFootprintCells, clampedFootprints, rejectedNeighbors, maxFootprintExtent;
+    uint32_t cacheRetained, cacheExpired, cacheRejected, cacheDropped;
+    uint32_t cacheLodRejected;
 };
-static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 80 && sizeof(Parameters) == 64 &&
+static_assert(sizeof(Voxel) == 32 && sizeof(Counters) == 100 && sizeof(Parameters) == 80 &&
               sizeof(Frame) == 176);
 class VulkanContext {
   public:

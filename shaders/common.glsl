@@ -11,6 +11,7 @@ layout(push_constant) uniform Parameters {
     vec4 config;     // base size, first LOD distance, hysteresis, splat scale
     ivec4 flags;     // LOD count, average (1) / closest (0), cube-light debug, view mode
     ivec4 footprint; // radius, write limit, renderer-only cull/index switches
+    vec4 cache;      // monotonic time, hold seconds (0 disables), previous cell count, hold LOD
 }
 params;
 vec3 animatePosition(vec3 p, float weight) {

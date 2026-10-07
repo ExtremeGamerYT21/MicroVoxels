@@ -2,6 +2,7 @@
 #include "lattice.hpp"
 #include "source_renderer.hpp"
 #include "surface_footprint.hpp"
+#include "voxel_cache.hpp"
 #include "voxel_renderer.hpp"
 #include <algorithm>
 #include <chrono>
@@ -19,7 +20,8 @@ using namespace micro;
 struct Options {
     int width = 1100, height = 720, frames = 0;
     bool hidden = false, verify = false, validation = false, exercise = false, noUi = false,
-         exerciseControls = false, exerciseStability = false, exerciseRender = false;
+         exerciseControls = false, exerciseStability = false, exerciseRender = false,
+         exerciseCache = false;
     bool vsync = true;
     int freezeAfter = -1;
     float fixedTime = -1;
@@ -68,6 +70,14 @@ Options parse(int argc, char **argv) {
             o.exerciseStability = true;
         else if (a == "--exercise-render")
             o.exerciseRender = true;
+        else if (a == "--exercise-cache")
+            o.exerciseCache = true;
+        else if (a == "--voxel-cache")
+            o.settings.voxelCache = true;
+        else if (a == "--no-voxel-cache")
+            o.settings.voxelCache = false;
+        else if (a == "--cache-ms")
+            o.settings.cacheMs = std::stof(value());
         else if (a == "--freeze-after")
             o.freezeAfter = std::stoi(value());
         else if (a == "--cube-mesh") {
@@ -125,6 +135,8 @@ Options parse(int argc, char **argv) {
                 << "--lighting 0|1|2 --debug-cubes --closest --supersampling --time SECONDS\n"
                 << "--no-ui --screenshot FILE.ppm --report FILE.json\n"
                 << "--no-vsync (uncapped presentation) --vsync (default)\n"
+                << "--voxel-cache --no-voxel-cache --cache-ms 0..500 (default: 100)\n"
+                << "--exercise-cache (43 frames; static, motion, expiry, freeze, reset)\n"
                 << "--point-splats --footprint-splats --footprint-radius 0..2 --footprint-limit "
                    "1..64\n"
                 << "--capture-sequence DIRECTORY --no-adaptive-lod --exercise-controls (16 frames) "
@@ -134,7 +146,8 @@ Options parse(int argc, char **argv) {
                 << "WASD/QE fly; right mouse look; Tab view; F freeze; G cube-light debug;\n"
                 << "O average/closest; X supersampling; H lighting; P pause; +/- voxel size;\n"
                 << "[/] LOD distance; 1..6 LOD count; R reset view; C adaptive LOD; F1 HUD; Esc "
-                   "exit; T point/footprint splats; I indexed cubes; B safe backface culling.\n";
+                   "exit; T point/footprint splats; I indexed cubes; B safe backface culling; "
+                   "K voxel cache.\n";
             std::exit(0);
         } else
             throw std::runtime_error("Unknown option: " + a);
@@ -146,7 +159,8 @@ Options parse(int argc, char **argv) {
         o.settings.mode < 0 || o.settings.mode > 2 || o.settings.lighting < 0 ||
         o.settings.lighting > 2 || o.settings.footprintRadius < 0 ||
         o.settings.footprintRadius > 2 || o.settings.footprintLimit < 1 ||
-        o.settings.footprintLimit > 64)
+        o.settings.footprintLimit > 64 || !std::isfinite(o.settings.cacheMs) ||
+        o.settings.cacheMs < 0 || o.settings.cacheMs > 500)
         throw std::runtime_error("Settings out of range; see --help");
     if (o.exercise && o.frames < 8)
         throw std::runtime_error("--exercise requires --frames 8 or more");
@@ -165,9 +179,16 @@ Options parse(int argc, char **argv) {
         o.verify = true;
         o.fixedTime = 1;
     }
-    if (o.freezeAfter < -1 || (o.freezeAfter >= 0 &&
-        (o.frames <= o.freezeAfter || o.exercise || o.exerciseControls ||
-         o.exerciseStability || o.exerciseRender)))
+    if (o.exerciseCache) {
+        if (o.frames < 43 || o.exercise || o.exerciseControls || o.exerciseStability ||
+            o.exerciseRender)
+            throw std::runtime_error("--exercise-cache needs 43 frames and no other exercise");
+        o.verify = true;
+        o.fixedTime = 1;
+    }
+    if (o.freezeAfter < -1 ||
+        (o.freezeAfter >= 0 && (o.frames <= o.freezeAfter || o.exercise || o.exerciseControls ||
+                                o.exerciseStability || o.exerciseRender || o.exerciseCache)))
         throw std::runtime_error("--freeze-after needs more frames than N and no exercise");
     o.settings.visibleHud = !o.noUi;
     return o;
@@ -178,6 +199,7 @@ struct Input {
     glm::vec3 *camera;
     double lastX{}, lastY{};
     bool looking = false, anchored = false;
+    bool resetCacheRequested = true;
     float yaw = -2.14f, pitch = -.27f;
     glm::vec3 homeCamera{5.8f, 3.6f, 8.4f};
     float homeYaw = -2.14f, homePitch = -.27f;
@@ -192,6 +214,7 @@ void resetCamera(GLFWwindow *w, Input &in) {
     in.yaw = in.homeYaw;
     in.pitch = in.homePitch;
     in.settings->frozen = false;
+    in.resetCacheRequested = true;
 }
 void focusCallback(GLFWwindow *w, int focused) {
     if (!focused)
@@ -223,6 +246,8 @@ void keyCallback(GLFWwindow *w, int key, int, int action, int) {
         s.indexedCubes = !s.indexedCubes;
     if (key == GLFW_KEY_B)
         s.cullCubes = !s.cullCubes;
+    if (key == GLFW_KEY_K)
+        s.voxelCache = !s.voxelCache;
     if (key == GLFW_KEY_O)
         s.average = !s.average;
     if (key == GLFW_KEY_X)
@@ -429,8 +454,15 @@ struct ReferenceCell {
     float nearestDepth = 1e30f;
 };
 using RootHistory = std::map<std::array<int32_t, 3>, int>;
+using LodChangeHistory = std::map<std::array<int32_t, 3>, uint32_t>;
+struct CachedReference {
+    Voxel voxel;
+    float lastSeen;
+};
+using CacheHistory = std::map<Cell, CachedReference>;
 void verify(const Parameters &p, const Frame &f, const Readback &readback, const Counters &c,
-            RootHistory &history, float &reconstructionError) {
+            RootHistory &history, LodChangeHistory &lodChanges, CacheHistory &cacheHistory,
+            float &reconstructionError) {
     if (c.vertexCount != 36 || c.firstVertex != 0 || c.firstInstance != 0)
         throw std::runtime_error("Invalid GPU indirect cube draw command");
     auto *positions = static_cast<const glm::vec4 *>(readback.positions.mapped);
@@ -442,7 +474,7 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
     // Raster edge snapping and attribute interpolation are not exact inverse projection.
     // Allow an eighth of a source pixel, while checking world/depth error separately.
     glm::vec3 projectionTolerance(.25f / p.extent.x, .25f / p.extent.y, .00001f);
-    if (c.dropped || c.rootDropped)
+    if (c.dropped || c.rootDropped || c.cacheDropped)
         throw std::runtime_error("Verification requires an unsaturated hash table");
     std::map<Cell, ReferenceCell> expected;
     RootHistory current;
@@ -465,6 +497,9 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
                 lod = std::max(
                     lod, chooseCoverageLod(footprint, p.config.x, p.flags.x, previous, p.config.z));
             }
+            if (p.cache.y > 0 && p.cache.w != 0 && previous >= 0 &&
+                uint32_t(p.cache.x * 1000) - lodChanges.at(root) < uint32_t(p.cache.y * 1000))
+                lod = previous;
             auto [region, inserted] = current.emplace(root, lod);
             if (!inserted)
                 region->second = std::max(region->second, lod);
@@ -556,15 +591,47 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
         std::abs(int64_t(maxExtent) - c.maxFootprintExtent) > 1)
         throw std::runtime_error(
             "GPU footprint candidate/limit statistics differ from CPU reference");
-    if (hits != c.hits || expected.size() != c.instanceCount)
+    if (p.cache.z == 0)
+        cacheHistory.clear();
+    CacheHistory retained, nextCache;
+    uint32_t expired = 0, rejectedCache = 0;
+    for (const auto &[key, old] : cacheHistory) {
+        if (expected.contains(key))
+            continue;
+        if (p.cache.x - old.lastSeen > p.cache.y) {
+            expired++;
+            continue;
+        }
+        float pitch = std::ldexp(p.config.x, key[3]);
+        if (!cacheSupported(key, glm::vec3(old.voxel.centerSize), pitch, p, f, positions,
+                            current)) {
+            rejectedCache++;
+            continue;
+        }
+        retained.emplace(key, old);
+    }
+    if (c.cacheRetained != retained.size() || c.cacheExpired != expired ||
+        c.cacheRejected != rejectedCache)
+        throw std::runtime_error(
+            "GPU voxel-cache retention/expiry differs from CPU source-buffer reference");
+    if (hits != c.hits || expected.size() + retained.size() != c.instanceCount)
         throw std::runtime_error("GPU hit or unique-cell count differs from CPU reference");
     for (uint32_t i = 0; i < c.instanceCount; i++) {
         auto &v = instances[i];
         int lod = int(std::round(std::log2(v.centerSize.w / (p.config.x * p.config.w))));
         auto key = cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, p.config.x, lod);
         auto found = expected.find(key);
-        if (found == expected.end())
-            throw std::runtime_error("Duplicate or unexpected GPU cell");
+        if (found == expected.end()) {
+            auto cached = retained.find(key);
+            if (cached == retained.end())
+                throw std::runtime_error("Duplicate or unexpected GPU cell");
+            if (std::memcmp(&v, &cached->second.voxel, sizeof(Voxel)))
+                throw std::runtime_error("Cached voxel changed its world cell or source RGB");
+            nextCache.emplace(key, cached->second);
+            retained.erase(cached);
+            expectedLods[lod]++;
+            continue;
+        }
         auto &ref = found->second;
         auto cen = center(key, p.config.x);
         for (int axis = 0; axis < 3; axis++)
@@ -578,12 +645,24 @@ void verify(const Parameters &p, const Frame &f, const Readback &readback, const
         if (v.rgba.w != 1)
             throw std::runtime_error("Unexpected opacity");
         expectedLods[lod]++;
+        nextCache.emplace(key, CachedReference{v, p.cache.x});
         expected.erase(found);
     }
     for (int i = 0; i < 8; i++)
         if (expectedLods[i] != c.perLod[i])
             throw std::runtime_error("LOD counters mismatch");
+    LodChangeHistory nextChanges;
+    for (const auto &[root, lod] : current) {
+        auto old = history.find(root);
+        nextChanges[root] = old != history.end() && old->second == lod ? lodChanges.at(root)
+                                                                       : uint32_t(p.cache.x * 1000);
+    }
+    lodChanges = std::move(nextChanges);
     history = std::move(current);
+    if (p.cache.y > 0 && c.instanceCount <= VisualVoxelizer::CacheCapacity)
+        cacheHistory = std::move(nextCache);
+    else
+        cacheHistory.clear();
 }
 void screenshot(const std::string &path, const VulkanContext &vk, const Readback &r) {
     if (path.empty())
@@ -653,27 +732,37 @@ int main(int argc, char **argv) {
             if (vk.timestampBits) {
                 VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-                ci.queryCount = 9;
+                ci.queryCount = 11;
                 check(vkCreateQueryPool(vk.device, &ci, nullptr, &queries), "timestamp query pool");
             }
             bool resize = true;
             Settings previous = s;
             Counters counts{};
-            std::array<double, 6> times{}, totals{};
+            std::array<double, 7> times{}, totals{};
             int timedFrames = 0;
             double cubeDrawTime = 0, cubeDrawTotal = 0;
             RootHistory history;
+            LodChangeHistory lodChanges;
+            CacheHistory cacheHistory;
             std::vector<Voxel> frozenSnapshot;
             Counters frozenCounts{};
             int frozenChecks = 0, verifiedFrames = 0, controlChecks = 0, stabilityChecks = 0;
             int renderFreezeChecks = 0;
+            int cacheStabilityChecks = 0, cacheFreezeChecks = 0;
+            uint64_t cacheMotionAdded = 0, cacheMotionRemoved = 0;
+            uint64_t cacheRetainedTotal = 0, cacheExpiredTotal = 0, cacheRejectedTotal = 0;
+            uint64_t cacheLodRejectedTotal = 0;
+            uint64_t cacheCopyBytes = 0, cacheCapacityResets = 0;
             Voxel renderProbe{};
             uint64_t motionAdded = 0, motionRemoved = 0;
             float reconstructionError = 0;
             std::map<Cell, glm::vec4> stableCells;
             std::map<Cell, glm::vec4> stationaryCloud;
+            std::map<Cell, glm::vec4> lastCacheCloud, stationaryCacheCloud;
             auto last = std::chrono::steady_clock::now();
             float animation = 0, fps = 60;
+            float cacheClock = 0;
+            glm::vec3 lastSampleCamera = camera, lastSampleForward{};
             int frameNumber = 0;
             Parameters parameters{};
             while (!glfwWindowShouldClose(vk.window) &&
@@ -681,6 +770,28 @@ int main(int argc, char **argv) {
                 glfwPollEvents();
                 if (opt.exerciseControls && frameNumber < 16)
                     exerciseControls(frameNumber, vk.window, input);
+                if (opt.exerciseCache) {
+                    if (frameNumber == 0 || frameNumber == 41)
+                        resetCamera(vk.window, input);
+                    if (frameNumber >= 3 && frameNumber <= 37) {
+                        camera.x += .003f;
+                        input.yaw += .0004f;
+                    }
+                    if (frameNumber == 38)
+                        s.frozen = true;
+                    if (frameNumber == 39) {
+                        camera += glm::vec3(-2, 0, -1);
+                        input.yaw -= .45f;
+                    }
+                    if (frameNumber == 40) {
+                        s.frozen = false;
+                        camera = {50, 50, 50};
+                        input.yaw = .7f;
+                        input.pitch = .5f;
+                    }
+                    if (frameNumber == 42)
+                        s.levels = s.levels == 1 ? 2 : 1;
+                }
                 if (opt.freezeAfter >= 0 && frameNumber >= opt.freezeAfter)
                     s.frozen = true;
                 if (opt.exerciseRender && frameNumber > 0) {
@@ -719,6 +830,9 @@ int main(int argc, char **argv) {
                 auto now = std::chrono::steady_clock::now();
                 float dt = std::chrono::duration<float>(now - last).count();
                 last = now;
+                cacheClock += opt.frames ? 1.f / 60 : std::max(dt, 0.f);
+                if (opt.exerciseCache && frameNumber == 37)
+                    cacheClock += s.cacheMs * .001f + .01f; // exercise hard expiry after a hitch
                 if (frameNumber > 0)
                     fps = frameNumber == 1 ? 1.f / std::max(dt, .0001f)
                                            : fps * .9f + .1f / std::max(dt, .0001f);
@@ -739,6 +853,16 @@ int main(int argc, char **argv) {
                 }
                 if (s.supersampling != previous.supersampling)
                     resize = true;
+                if (s.base != previous.base || s.levels != previous.levels ||
+                    s.distance != previous.distance || s.splat != previous.splat ||
+                    s.adaptiveLod != previous.adaptiveLod || s.lighting != previous.lighting ||
+                    s.average != previous.average || s.mode != previous.mode ||
+                    s.footprintSplats != previous.footprintSplats ||
+                    s.footprintRadius != previous.footprintRadius ||
+                    s.footprintLimit != previous.footprintLimit ||
+                    s.voxelCache != previous.voxelCache || s.cacheMs != previous.cacheMs ||
+                    (previous.frozen && !s.frozen))
+                    voxelizer.resetCache = true;
                 if (s.base != previous.base || s.levels != previous.levels ||
                     s.adaptiveLod != previous.adaptiveLod) {
                     voxelizer.resetHistory = true;
@@ -778,6 +902,10 @@ int main(int argc, char **argv) {
                           (forward * float(pressed(GLFW_KEY_W) - pressed(GLFW_KEY_S)) +
                            right * float(pressed(GLFW_KEY_D) - pressed(GLFW_KEY_A)) +
                            glm::vec3(0, 1, 0) * float(pressed(GLFW_KEY_E) - pressed(GLFW_KEY_Q)));
+                if (input.resetCacheRequested || glm::distance(camera, lastSampleCamera) > .5f ||
+                    (voxelizer.cloudReady && glm::dot(forward, lastSampleForward) < .96f))
+                    voxelizer.resetCache = true;
+                input.resetCacheRequested = false;
                 if (!s.paused)
                     animation += opt.frames ? 1.f / 60 : moveDt;
                 float time = opt.fixedTime >= 0 ? opt.fixedTime : animation;
@@ -805,7 +933,15 @@ int main(int argc, char **argv) {
                 parameters.flags = {s.levels, s.average ? 1 : 0, s.cubeLight ? 1 : 0, s.mode};
                 parameters.footprint = {s.footprintRadius, s.footprintLimit,
                                         s.cullCubes ? 1 : 0, s.indexedCubes ? 1 : 0};
+                bool caching = s.voxelCache && s.cacheMs > 0;
+                bool canReuse = caching && voxelizer.cacheReady && !voxelizer.resetCache &&
+                                counts.instanceCount <= VisualVoxelizer::CacheCapacity;
+                parameters.cache = {cacheClock, caching ? s.cacheMs * .001f : 0.f,
+                                    canReuse ? float(counts.instanceCount) : 0.f,
+                                    canReuse ? 1.f : 0.f};
                 bool generating = !s.frozen || !voxelizer.cloudReady;
+                if (generating && caching && counts.instanceCount > VisualVoxelizer::CacheCapacity)
+                    cacheCapacityResets++;
                 bool referenceReset = voxelizer.resetHistory;
                 if (referenceReset)
                     history.clear();
@@ -823,7 +959,7 @@ int main(int argc, char **argv) {
                     check(acquired, "acquire image");
                 vk.begin();
                 if (queries) {
-                    vkCmdResetQueryPool(vk.cmd, queries, 0, 9);
+                    vkCmdResetQueryPool(vk.cmd, queries, 0, 11);
                     vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0);
                 }
                 source.render(voxelizer.current, parameters);
@@ -831,10 +967,11 @@ int main(int argc, char **argv) {
                     vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 1);
                 if (generating)
                     voxelizer.generate(parameters, queries);
-                else if (queries)
-                    for (uint32_t i = 2; i <= 4; i++)
+                else if (queries) {
+                    for (uint32_t i : {2u, 3u, 9u, 10u, 4u})
                         vkCmdWriteTimestamp(vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries,
                                             i);
+                }
                 renderer.prepare(parameters);
                 renderer.begin(parameters);
                 renderer.draw(parameters, queries);
@@ -909,6 +1046,14 @@ int main(int argc, char **argv) {
                     check(pr, "present");
                 vk.wait();
                 std::memcpy(&counts, readback.counters.mapped, sizeof(counts));
+                if (generating) {
+                    cacheRetainedTotal += counts.cacheRetained;
+                    cacheExpiredTotal += counts.cacheExpired;
+                    cacheRejectedTotal += counts.cacheRejected;
+                    cacheLodRejectedTotal += counts.cacheLodRejected;
+                    cacheCopyBytes +=
+                        uint64_t(parameters.cache.z) * (sizeof(Voxel) + sizeof(float));
+                }
                 if (opt.exerciseControls && frameNumber < 16) {
                     bool empty = frameNumber == 2 || frameNumber == 3;
                     if ((counts.hits == 0) != empty || (!empty && counts.instanceCount == 0))
@@ -917,8 +1062,8 @@ int main(int argc, char **argv) {
                     controlChecks++;
                 }
                 if (queries) {
-                    std::array<uint64_t, 9> stamps{};
-                    check(vkGetQueryPoolResults(vk.device, queries, 0, 9, sizeof(stamps),
+                    std::array<uint64_t, 11> stamps{};
+                    check(vkGetQueryPoolResults(vk.device, queries, 0, 11, sizeof(stamps),
                                                 stamps.data(), 8,
                                                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
                           "read timestamps");
@@ -928,12 +1073,14 @@ int main(int argc, char **argv) {
                     for (int i = 0; i < 6; i++)
                         times[i] =
                             double((stamps[i + 1] - stamps[i]) & mask) * vk.timestampPeriod / 1e6;
+                    times[6] = double((stamps[10] - stamps[9]) & mask) * vk.timestampPeriod / 1e6;
+                    times[3] = std::max(0.0, times[3] - times[6]);
                     cubeDrawTime =
                         double((stamps[8] - stamps[7]) & mask) * vk.timestampPeriod / 1e6;
                     bool timed = opt.freezeAfter >= 0
                                      ? frameNumber >= opt.freezeAfter && s.frozen : generating;
                     if (frameNumber >= 2 && timed) {
-                        for (int i = 0; i < 6; i++)
+                        for (int i = 0; i < 7; i++)
                             totals[i] += times[i];
                         cubeDrawTotal += cubeDrawTime;
                         timedFrames++;
@@ -946,7 +1093,8 @@ int main(int argc, char **argv) {
                     screenshot(name.str(), vk, readback);
                 }
                 if (opt.verify && generating) {
-                    verify(parameters, frame, readback, counts, history, reconstructionError);
+                    verify(parameters, frame, readback, counts, history, lodChanges, cacheHistory,
+                           reconstructionError);
                     verifiedFrames++;
                 }
                 if (opt.exerciseRender) {
@@ -970,6 +1118,55 @@ int main(int argc, char **argv) {
                             throw std::runtime_error("Render exercise changed the frozen cloud");
                         ++renderFreezeChecks;
                     }
+                }
+                if (opt.exerciseCache) {
+                    auto *data = static_cast<const Voxel *>(readback.instances.mapped);
+                    std::map<Cell, glm::vec4> cloud;
+                    for (uint32_t i = 0; i < counts.instanceCount; ++i) {
+                        const auto &v = data[i];
+                        int lod = int(std::round(std::log2(v.centerSize.w / (s.base * s.splat))));
+                        auto key =
+                            cell({v.centerSize.x, v.centerSize.y, v.centerSize.z}, s.base, lod);
+                        if (!cloud.emplace(key, v.rgba).second)
+                            throw std::runtime_error("Cache exercise found duplicate cubes");
+                    }
+                    if (frameNumber == 0)
+                        stationaryCacheCloud = cloud;
+                    if (frameNumber == 1 || frameNumber == 2) {
+                        if (cloud != stationaryCacheCloud)
+                            throw std::runtime_error(
+                                "Cache changed stationary world cells or source RGB");
+                        cacheStabilityChecks++;
+                    }
+                    if (frameNumber >= 3 && frameNumber <= 36) {
+                        for (const auto &[key, rgb] : cloud)
+                            if (!lastCacheCloud.contains(key))
+                                cacheMotionAdded++;
+                        for (const auto &[key, rgb] : lastCacheCloud)
+                            if (!cloud.contains(key))
+                                cacheMotionRemoved++;
+                    }
+                    if (frameNumber == 38) {
+                        frozenSnapshot.assign(data, data + counts.instanceCount);
+                        frozenCounts = counts;
+                    }
+                    if (frameNumber == 39) {
+                        if (std::memcmp(&counts, &frozenCounts, sizeof(counts)) ||
+                            std::memcmp(data, frozenSnapshot.data(),
+                                        frozenSnapshot.size() * sizeof(Voxel)))
+                            throw std::runtime_error(
+                                "Cache changed a frozen cloud after camera movement");
+                        cacheFreezeChecks++;
+                    }
+                    if (frameNumber == 40 && (counts.hits || counts.instanceCount))
+                        throw std::runtime_error(
+                            "Cache left cubes after moving into an empty source view");
+                    if (frameNumber == 41 || frameNumber == 42) {
+                        if (!counts.hits || !counts.instanceCount || counts.cacheRetained)
+                            throw std::runtime_error(
+                                "Cache reset retained old cells after camera/grid reset");
+                    }
+                    lastCacheCloud = std::move(cloud);
                 }
                 if (opt.exerciseStability && frameNumber < 12) {
                     if (!generating)
@@ -1019,8 +1216,11 @@ int main(int argc, char **argv) {
                         frozenChecks++;
                     }
                 }
-                if (generating)
+                if (generating) {
+                    lastSampleCamera = camera;
+                    lastSampleForward = forward;
                     voxelizer.advance();
+                }
                 previous = s;
                 frameNumber++;
                 std::string title = "Microvoxels | " + std::to_string(counts.instanceCount) +
@@ -1053,12 +1253,13 @@ int main(int argc, char **argv) {
                           << "; moving floor patch: " << motionAdded << " cell additions, "
                           << motionRemoved << " removals\n";
             if (timedFrames)
-                for (int i = 0; i < 6; i++)
+                for (int i = 0; i < 7; i++)
                     totals[i] /= timedFrames;
             if (timedFrames)
                 cubeDrawTotal /= timedFrames;
             const char *labels[] = {"source_and_shadow_ms", "lod_and_clear_ms", "hash_ms",
-                                    "compact_ms",           "final_render_ms",  "hud_ms"};
+                                    "compact_ms",           "final_render_ms",  "hud_ms",
+                                    "cache_resolve_ms"};
             if (!opt.report.empty()) {
                 auto parent = std::filesystem::path(opt.report).parent_path();
                 if (!parent.empty())
@@ -1069,22 +1270,45 @@ int main(int argc, char **argv) {
                 f << std::setprecision(6) << "{\n  \"device\": \"" << vk.gpuName
                   << "\",\n  \"source_backend\": \"Vulkan raster G-buffer\",\n  \"frames\": "
                   << frameNumber << ",\n  \"timed_frames_after_warmup\": " << timedFrames
-                  << ",\n  \"scene\": \"" << (opt.scene == SourceScene::Garden ? "garden" : "test") << "\""
+                  << ",\n  \"scene\": \"" << (opt.scene == SourceScene::Garden ? "garden" : "test")
+                  << "\""
                   << ",\n  \"vsync_requested\": " << (vk.vsyncRequested ? "true" : "false")
                   << ",\n  \"present_mode\": \"" << vk.presentModeName() << "\""
                   << ",\n  \"device_type\": \""
-                  << (vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_CPU ? "cpu"
-                      : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete"
-                      : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" : "other") << "\""
+                  << (vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_CPU              ? "cpu"
+                      : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU   ? "discrete"
+                      : vk.gpuType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated"
+                                                                             : "other")
+                  << "\""
                   << ",\n  \"cube_mesh\": \"" << (s.indexedCubes ? "indexed" : "legacy") << "\""
                   << ",\n  \"cube_backface_culling\": " << (s.cullCubes ? "true" : "false")
                   << ",\n  \"cube_distinct_vertex_ids\": "
                   << (s.indexedCubes ? (s.cullCubes || s.cubeLight ? 24 : 8) : 36)
                   << ",\n  \"instance_bytes_per_voxel\": " << sizeof(Voxel)
-                  << ",\n  \"used_instance_bytes\": " << uint64_t(counts.instanceCount) * sizeof(Voxel)
+                  << ",\n  \"used_instance_bytes\": "
+                  << uint64_t(counts.instanceCount) * sizeof(Voxel)
                   << ",\n  \"allocated_instance_bytes\": " << voxelizer.instances.size
-                  << ",\n  \"freeze_after\": " << opt.freezeAfter
-                  << ",\n  \"timing_scope\": \"" << (opt.freezeAfter >= 0 ? "frozen" : "generating") << "\""
+                  << ",\n  \"voxel_cache\": " << (s.voxelCache && s.cacheMs > 0 ? "true" : "false")
+                  << ",\n  \"cache_hold_ms\": " << s.cacheMs
+                  << ",\n  \"cache_capacity_voxels\": " << VisualVoxelizer::CacheCapacity
+                  << ",\n  \"cache_allocated_bytes\": "
+                  << uint64_t(VisualVoxelizer::CacheCapacity) * (sizeof(Voxel) + 2 * sizeof(float))
+                  << ",\n  \"cache_retained_voxels\": " << counts.cacheRetained
+                  << ",\n  \"cache_expired_voxels\": " << counts.cacheExpired
+                  << ",\n  \"cache_rejected_voxels\": " << counts.cacheRejected
+                  << ",\n  \"cache_dropped_voxels\": " << counts.cacheDropped
+                  << ",\n  \"cache_retained_total\": " << cacheRetainedTotal
+                  << ",\n  \"cache_expired_total\": " << cacheExpiredTotal
+                  << ",\n  \"cache_rejected_total\": " << cacheRejectedTotal
+                  << ",\n  \"cache_lod_rejected_total\": " << cacheLodRejectedTotal
+                  << ",\n  \"cache_history_copy_bytes_total\": " << cacheCopyBytes
+                  << ",\n  \"cache_capacity_resets\": " << cacheCapacityResets
+                  << ",\n  \"cache_motion_cell_additions\": " << cacheMotionAdded
+                  << ",\n  \"cache_motion_cell_removals\": " << cacheMotionRemoved
+                  << ",\n  \"cache_stability_checks\": " << cacheStabilityChecks
+                  << ",\n  \"cache_freeze_checks\": " << cacheFreezeChecks
+                  << ",\n  \"freeze_after\": " << opt.freezeAfter << ",\n  \"timing_scope\": \""
+                  << (opt.freezeAfter >= 0 ? "frozen" : "generating") << "\""
                   << ",\n  \"render_freeze_checks\": " << renderFreezeChecks
                   << ",\n  \"triangles\": " << world.triangleCount()
                   << ",\n  \"samples\": " << source.width * source.height
@@ -1121,9 +1345,10 @@ int main(int argc, char **argv) {
                   << ",\n  \"motion_patch_cell_additions\": " << motionAdded
                   << ",\n  \"motion_patch_cell_removals\": " << motionRemoved
                   << ",\n  \"stationary_cloud_cells_checked\": " << stationaryCloud.size()
-                  << ",\n  \"gpu_generation_ms\": " << totals[1] + totals[2] + totals[3]
+                  << ",\n  \"gpu_generation_ms\": " << totals[1] + totals[2] + totals[3] + totals[6]
                   << ",\n  \"final_voxel_draw_ms\": " << cubeDrawTotal << ",\n  \"gpu_frame_ms\": "
-                  << totals[0] + totals[1] + totals[2] + totals[3] + totals[4] + totals[5]
+                  << totals[0] + totals[1] + totals[2] + totals[3] + totals[4] + totals[5] +
+                         totals[6]
                   << ",\n  \"stability_checks\": " << stabilityChecks
                   << ",\n  \"stable_cells_checked\": " << stableCells.size()
                   << ",\n  \"adaptive_lod\": " << (s.adaptiveLod ? "true" : "false")
@@ -1133,7 +1358,7 @@ int main(int argc, char **argv) {
                 for (int i = 0; i < s.levels; i++)
                     f << (i ? ", " : "") << counts.perLod[i];
                 f << "],\n  \"average_gpu_timings\": {";
-                for (int i = 0; i < 6; i++)
+                for (int i = 0; i < 7; i++)
                     f << (i ? ", " : "") << "\"" << labels[i] << "\": " << totals[i];
                 f << "}\n}\n";
             }

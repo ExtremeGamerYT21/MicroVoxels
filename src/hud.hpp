@@ -3,11 +3,11 @@
 #include <functional>
 namespace micro {
 struct Settings {
-    float base = .01f, distance = 4.f, splat = 1.0f;
+    float base = .01f, distance = 4.f, splat = 1.0f, cacheMs = 100.f;
     int levels = 5, mode = 2, lighting = 2, footprintRadius = 1, footprintLimit = 27;
     bool average = true, cubeLight = false, frozen = false, supersampling = false, paused = false,
-         visibleHud = true, adaptiveLod = true, footprintSplats = true,
-         indexedCubes = false, cullCubes = false;
+         visibleHud = true, adaptiveLod = true, footprintSplats = true, indexedCubes = false,
+         cullCubes = false, voxelCache = true;
 };
 struct HudVertex {
     glm::vec2 position;
@@ -25,7 +25,7 @@ class Hud {
   public:
     Hud(VulkanContext &vk, VkRenderPass pass, VkDescriptorSetLayout setLayout);
     ~Hud();
-    void build(const Settings &s, const Counters &counts, const std::array<double, 6> &times,
+    void build(const Settings &s, const Counters &counts, const std::array<double, 7> &times,
                size_t triangles, uint32_t width, uint32_t height, float fps, double cubeDrawTime);
     void draw();
     void click(double x, double y, Settings &s);
