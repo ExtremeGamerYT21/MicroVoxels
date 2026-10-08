@@ -70,7 +70,7 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 7
     mesh.clear();
     if (!s.visibleHud)
         return;
-    rect(8, 8, 430, 454, {.01f, .018f, .03f, .90f});
+    rect(8, 8, 430, 491, {.01f, .018f, .03f, .90f});
     text(18, 18, "MICROVOXELS - CONTINUOUS SOURCE / UNLIT CUBES", {.30f, .88f, .70f, 1});
     for (int i = 0; i < 3; i++) {
         rect(18 + 140 * i, 37, 130, 21,
@@ -122,8 +122,9 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 7
     text(18, 355, std::string("C: PROJECTED-SIZE LOD ") + (s.adaptiveLod ? "ON" : "OFF"));
     text(18, 373,
          c.hits ? "WASD QE / RIGHT MOUSE / R RESET / F1 HUD" : "NO SOURCE HITS - R: RESET VIEW");
-    text(18, 393, std::string("I: INDEXED ") + (s.indexedCubes ? "ON" : "OFF") +
-                      "   B: BACKFACE CULL " + (s.cullCubes ? "ON" : "OFF"));
+    text(18, 393,
+         std::string("I: INDEXED ") + (s.indexedCubes ? "ON" : "OFF") + "   B: BACKFACE CULL " +
+             (s.cullCubes ? "ON" : "OFF"));
     text(18, 413,
          std::string("K: VOXEL CACHE ") +
              (s.voxelCache && s.cacheMs > 0 ? "ON " + number(s.cacheMs, 0) + " MS" : "OFF") +
@@ -131,6 +132,10 @@ void Hud::build(const Settings &s, const Counters &c, const std::array<double, 7
     text(18, 433,
          "CACHE " + number(t[6]) + " MS  EXPIRED " + std::to_string(c.cacheExpired) +
              "  REJECTED " + std::to_string(c.cacheRejected));
+    text(18, 453, std::string("M: SOURCE ") + (s.raymarch ? "SPHERE TRACING" : "RASTER"));
+    text(18, 473,
+         std::string("J: WORLD TAA ") + (s.temporalAA ? "ON" : "OFF") + "  RGB BLENDS " +
+             std::to_string(c.temporalBlends));
     if (mesh.size() * sizeof(HudVertex) > vertices.size)
         throw std::runtime_error("HUD buffer too small");
     std::memcpy(vertices.mapped, mesh.data(), mesh.size() * sizeof(HudVertex));
@@ -169,6 +174,10 @@ void Hud::click(double x, double y, Settings &s) {
     }
     if (y >= 409 && y <= 428 && x >= 18 && x <= 430)
         s.voxelCache = !s.voxelCache;
+    if (y >= 448 && y <= 468 && x >= 18 && x <= 430)
+        s.raymarch = !s.raymarch;
+    if (y >= 469 && y <= 490 && x >= 18 && x <= 430)
+        s.temporalAA = !s.temporalAA;
     if (x >= 208 && x <= 418) {
         if (y >= 89 && y <= 107)
             s.base = .005f + .145f * float((x - 208) / 210);

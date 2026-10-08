@@ -49,6 +49,20 @@ int main() {
         regions.clear();
         require(!cacheSupported({-1, -1, 5, 0}, center, .1f, p, frame, positions.data(), regions),
                 "An unsampled LOD region must not retain old geometry");
+        p.temporal.x = .2f;
+        require(cacheSupported({-1, -1, 5, 0}, center, .1f, p, frame, positions.data(), regions),
+                "An unsampled jitter phase must retain eligible temporal history");
+        p.flags.x = 1;
+        frame.vp[2][3] = 1; // positive view depth depends on world z
+        for (auto &sample : positions)
+            sample = glm::vec4(0, 0, .1f, 1);
+        require(!cacheSupported({0, 0, 5, 0}, {.05f, .05f, .55f}, .1f, p, frame, positions.data(),
+                                regions),
+                "A complete foreground neighborhood must reject occluded temporal history");
+        positions[12] = glm::vec4(0);
+        require(cacheSupported({0, 0, 5, 0}, {.05f, .05f, .55f}, .1f, p, frame, positions.data(),
+                               regions),
+                "A missing subpixel sample must not erase temporal history");
         std::cout
             << "Voxel cache: neighboring support, discontinuities, frustum and nested LOD passed\n";
     } catch (const std::exception &error) {

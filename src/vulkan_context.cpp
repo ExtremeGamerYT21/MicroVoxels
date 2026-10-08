@@ -158,7 +158,7 @@ VulkanContext::VulkanContext(int w, int h, bool hidden, bool validate, bool vsyn
     check(vkCreateSampler(device, &sci, nullptr, &sampler), "create sampler");
     resizeSwapchain();
     std::cout << "Device: " << gpuName
-              << "; Vulkan raster source -> compute samples -> unlit indirect cubes\n";
+              << "; Vulkan source visibility -> world samples -> unlit indirect cubes\n";
 }
 uint32_t VulkanContext::memoryType(uint32_t bits, VkMemoryPropertyFlags flags) {
     VkPhysicalDeviceMemoryProperties p;

@@ -5,6 +5,7 @@
 #include "lattice.glsl"
 #include "surface_footprint.glsl"
 layout(local_size_x = 256) in;
+layout(set = 0, binding = 7) uniform sampler2D colors;
 layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D lods;
 #include "voxel_history.glsl"
 layout(set = 0, binding = 5, std430) readonly buffer CurrentRoots {
@@ -24,19 +25,31 @@ bool currentLod(ivec4 key) {
     for (uint i = 0u; i < 64u; i++) {
         Root entry = currentRoots[(slot + i) & (ROOT_CAPACITY - 1u)];
         if (entry.owner == 0u)
-            return false;
+            return params.temporal.x > 0; // unsampled region has no fresh parent/child cells
         if (all(equal(rootCell(texelFetch(positions, pixel(entry.owner - 1u), 0).xyz), root)))
             return entry.lod == uint(key.w);
     }
-    return false;
+    return params.temporal.x > 0;
 }
 bool supported(vec3 center, float pitch) {
     vec4 clip = frame.viewProjection * vec4(center, 1);
     if (clip.w <= 0)
         return false;
     vec3 ndc = clip.xyz / clip.w;
-    if (any(lessThan(ndc, vec3(-1, -1, 0))) || any(greaterThan(ndc, vec3(1))))
-        return false;
+    if (params.temporal.x == 0) {
+        if (any(lessThan(ndc, vec3(-1, -1, 0))) || any(greaterThan(ndc, vec3(1))))
+            return false;
+    } else {
+        vec3 w = vec3(frame.viewProjection[0][3], frame.viewProjection[1][3], frame.viewProjection[2][3]);
+        for (int axis = 0; axis < 3; axis++) {
+            vec3 row = vec3(frame.viewProjection[0][axis], frame.viewProjection[1][axis], frame.viewProjection[2][axis]);
+            float lower = axis == 2 ? 0 : -1;
+            float loRadius = .5 * pitch * dot(abs(row - lower * w), vec3(1));
+            float hiRadius = .5 * pitch * dot(abs(row - w), vec3(1));
+            if (clip[axis] < lower * clip.w - loRadius || clip[axis] > clip.w + hiRadius)
+                return false;
+        }
+    }
     ivec2 p = ivec2(floor((ndc.xy * .5 + .5) * vec2(params.extent.xy)));
     // Quantization can move the projected cell center several pixels away from
     // its supporting sample. Bound this lookup to 7x7, still requiring the hit
@@ -50,6 +63,26 @@ bool supported(vec3 center, float pitch) {
             if (hit.w != 0 && all(lessThanEqual(abs(hit.xyz - center), vec3(.65 * pitch))))
                 return true;
         }
+    if (params.temporal.x == 0)
+        return false;
+    if (params.history.x != 0)
+        return true; // jitter does not change actual visibility for a stationary source/view
+    // Temporal accumulation must survive an entire blade missing this jitter
+    // phase. Absence of a point sample is not proof that the world cell vanished.
+    // Keep it until its last fresh observation expires, unless a complete 3x3
+    // foreground neighborhood now occludes its conservative near depth.
+    vec3 depthAxis = vec3(frame.viewProjection[0][3], frame.viewProjection[1][3],
+                          frame.viewProjection[2][3]);
+    float nearDepth = clip.w - .8 * pitch * length(depthAxis);
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++) {
+            ivec2 q = p + ivec2(x, y);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, params.extent.xy)))
+                return true;
+            vec4 hit = texelFetch(positions, q, 0);
+            if (hit.w == 0 || (frame.viewProjection * vec4(hit.xyz, 1)).w >= nearDepth)
+                return true;
+        }
     return false;
 }
 void main() {
@@ -58,13 +91,34 @@ void main() {
         return;
     ivec4 key = cachedKey(index);
     uint slot = hashKey(key) & uint(params.extent.z - 1);
-    // Current-frame samples win. History never enters their RGB reduction.
+    // Fresh spatial reduction is finished before this pass. Each prior exact
+    // key is unique, so one invocation can finalize its temporal RGB without
+    // another hash, buffer or atomic accumulation of stale contributors.
     for (uint probe = 0u; probe < 96u; probe++) {
-        uint owner = atomicAdd(slots[(slot + probe) & uint(params.extent.z - 1)].owner, 0u);
+        uint s = (slot + probe) & uint(params.extent.z - 1);
+        uint owner = atomicAdd(slots[s].owner, 0u);
         if (owner == 0u)
             break;
-        if (all(equal(resolvedKey(owner), key)))
+        if (all(equal(resolvedKey(owner), key))) {
+            if (params.temporal.x > 0 && (owner & CACHE_OWNER) == 0u &&
+                params.cache.x - cachedSeen[index] <= params.cache.y) {
+                vec3 fresh = params.flags.y == 1
+                    ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023 * float(slots[s].count))
+                    : texelFetch(colors, ownerPixel(slots[s].nearest), 0).rgb;
+                vec3 previous = cachedVoxels[index].rgba.rgb;
+                // A large color change reacts immediately rather than dragging
+                // unrelated material or changing source illumination behind it.
+                float alpha = max(params.temporal.x,
+                                  smoothstep(.10, .35, length(fresh - previous)));
+                vec3 rgb = clamp(mix(previous, fresh, alpha), 0, 1);
+                slots[s].r = floatBitsToUint(rgb.r);
+                slots[s].g = floatBitsToUint(rgb.g);
+                slots[s].b = floatBitsToUint(rgb.b);
+                slots[s].nearest |= CACHE_OWNER; // compact reads finalized RGB; owner stays fresh
+                atomicAdd(temporalBlends, 1u);
+            }
             return;
+        }
     }
     if (params.cache.x - cachedSeen[index] > params.cache.y) {
         atomicAdd(cacheExpired, 1u);

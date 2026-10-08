@@ -1,7 +1,7 @@
 # Bounded visual voxel persistence
 
 The cache keeps briefly missing world cells rather than rebuilding occupancy
-entirely from the current frame. It is enabled by default for 100 ms. **K** toggles
+entirely from the current frame. The original cache-only comparison uses 100 ms (`--source raster --no-taa --cache-ms 100`). The current world temporal AA mode uses 200 ms by default; see [world temporal sampling](WORLD_TEMPORAL_AA.md) for its RGB accumulation and missing-sample policy. **K** toggles
 it; `--no-voxel-cache` restores frame-local occupancy and the original LOD timing.
 `--cache-ms 0..500` sets the hold window. **P** pauses source wind and **F** freezes
 the entire cloud.

@@ -3,11 +3,13 @@
 #include <functional>
 namespace micro {
 struct Settings {
-    float base = .01f, distance = 4.f, splat = 1.0f, cacheMs = 100.f;
+    float base = .01f, distance = 4.f, splat = 1.0f, cacheMs = 200.f;
     int levels = 5, mode = 2, lighting = 2, footprintRadius = 1, footprintLimit = 27;
     bool average = true, cubeLight = false, frozen = false, supersampling = false, paused = false,
          visibleHud = true, adaptiveLod = true, footprintSplats = true, indexedCubes = false,
-         cullCubes = false, voxelCache = true;
+         cullCubes = false, voxelCache = true, raymarch = true, temporalAA = true;
+    float temporalWeight = .2f;
+    int traceSteps = 512;
 };
 struct HudVertex {
     glm::vec2 position;

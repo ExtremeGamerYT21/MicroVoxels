@@ -1,4 +1,5 @@
 #include "source_renderer.hpp"
+#include "source_bvh.hpp"
 #include <algorithm>
 #include <cstring>
 namespace micro {
@@ -15,15 +16,39 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
         data[i] = {glm::vec4(v.position, v.material.x), glm::vec4(v.normal, v.material.y),
                    glm::vec4(v.color, 1)};
     }
+    SourceDistanceBvh bvh(world);
+    auto upload = [&](const void *data, VkDeviceSize size) {
+        Buffer staging = vk.buffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+        std::memcpy(staging.mapped, data, size);
+        Buffer device =
+            vk.buffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        vk.immediateBegin();
+        VkBufferCopy copy{0, 0, size};
+        vkCmdCopyBuffer(vk.cmd, staging.handle, device.handle, 1, &copy);
+        vk.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        vk.immediateEnd();
+        vk.destroy(staging);
+        return device;
+    };
+    distanceNodes = upload(bvh.nodes.data(), bvh.nodes.size() * sizeof(DistanceNode));
+    distanceTriangles = upload(bvh.triangles.data(), bvh.triangles.size() * sizeof(uint32_t));
+    traceStats =
+        vk.buffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     VkDescriptorSetLayoutBinding bindings[] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
          VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
+         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+         nullptr},
+        {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
     VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    ci.bindingCount = 4;
+    ci.bindingCount = 7;
     ci.pBindings = bindings;
     check(vkCreateDescriptorSetLayout(vk.device, &ci, nullptr, &setLayout),
           "source descriptor layout");
@@ -38,8 +63,11 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
     VkDescriptorBufferInfo originalInfo{originalVertices.handle, 0, originalVertices.size},
         animatedInfo{animatedVertices.handle, 0, animatedVertices.size};
-    VkWriteDescriptorSet writes[4]{};
-    for (int i = 0; i < 4; i++) {
+    VkDescriptorBufferInfo distanceInfo{distanceNodes.handle, 0, distanceNodes.size},
+        triangleInfo{distanceTriangles.handle, 0, distanceTriangles.size},
+        traceInfo{traceStats.handle, 0, traceStats.size};
+    VkWriteDescriptorSet writes[7]{};
+    for (int i = 0; i < 7; i++) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
@@ -50,7 +78,10 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
     writes[1].pImageInfo = &ii;
     writes[2].pBufferInfo = &originalInfo;
     writes[3].pBufferInfo = &animatedInfo;
-    vkUpdateDescriptorSets(vk.device, 4, writes, 0, nullptr);
+    writes[4].pBufferInfo = &distanceInfo;
+    writes[5].pBufferInfo = &triangleInfo;
+    writes[6].pBufferInfo = &traceInfo;
+    vkUpdateDescriptorSets(vk.device, 7, writes, 0, nullptr);
     VkAttachmentDescription sa{};
     sa.format = VK_FORMAT_D32_SFLOAT;
     sa.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -119,6 +150,8 @@ SourceRenderer::SourceRenderer(VulkanContext &context, const SourceWorld &world,
     rp.pDependencies = sourceDeps;
     check(vkCreateRenderPass(vk.device, &rp, nullptr, &pass), "source render pass");
     pipeline = vk.graphics(layout, pass, "source.vert", "source.frag", 2, true);
+    raymarchPipeline =
+        vk.graphics(layout, pass, "fullscreen.vert", "source_raymarch.frag", 2, true);
     shadowPipeline = vk.graphics(layout, shadowPass, "shadow.vert", "", 0, true);
     animatePipeline = vk.compute(layout, "source_animate.comp");
 }
@@ -154,7 +187,14 @@ void SourceRenderer::resize(uint32_t w, uint32_t h) {
     }
     vk.immediateEnd();
 }
-void SourceRenderer::render(int target, const Parameters &parameters) {
+void SourceRenderer::render(int target, const Parameters &parameters, bool raymarch) {
+    vk.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_ACCESS_TRANSFER_WRITE_BIT);
+    vkCmdFillBuffer(vk.cmd, traceStats.handle, 0, traceStats.size, 0);
+    vk.barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+               VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     vk.barrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
@@ -163,7 +203,8 @@ void SourceRenderer::render(int target, const Parameters &parameters) {
     vkCmdPushConstants(vk.cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof(parameters), &parameters);
     vkCmdDispatch(vk.cmd, (vertexCount + 63) / 64, 1, 1);
     vk.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+               VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     vkCmdBindDescriptorSets(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0,
                             nullptr);
@@ -190,8 +231,10 @@ void SourceRenderer::render(int target, const Parameters &parameters) {
     bi.pClearValues = clears;
     vkCmdBeginRenderPass(vk.cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
     vk.viewport(0, 0, float(width), float(height));
-    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdDraw(vk.cmd, vertexCount, 1, 0, 0);
+    vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      raymarch ? raymarchPipeline : pipeline);
+    vkCmdPushConstants(vk.cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof(parameters), &parameters);
+    vkCmdDraw(vk.cmd, raymarch ? 3 : vertexCount, 1, 0, 0);
     vkCmdEndRenderPass(vk.cmd);
 }
 void SourceRenderer::destroyTargets() {
@@ -209,9 +252,13 @@ SourceRenderer::~SourceRenderer() {
     destroyTargets();
     vk.destroy(originalVertices);
     vk.destroy(animatedVertices);
+    vk.destroy(distanceNodes);
+    vk.destroy(distanceTriangles);
+    vk.destroy(traceStats);
     vkDestroyFramebuffer(vk.device, shadowFramebuffer, nullptr);
     vk.destroy(shadow);
     vkDestroyPipeline(vk.device, pipeline, nullptr);
+    vkDestroyPipeline(vk.device, raymarchPipeline, nullptr);
     vkDestroyPipeline(vk.device, animatePipeline, nullptr);
     vkDestroyPipeline(vk.device, shadowPipeline, nullptr);
     vkDestroyRenderPass(vk.device, pass, nullptr);

@@ -24,23 +24,23 @@ jobs:
           VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
         run: |
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/ci.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --supersampling --frames 3 --width 320 --height 240 --no-ui --report captures/supersampling.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --report captures/controls.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --point-splats --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/point-exercise.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --exercise-stability --frames 12 --width 640 --height 480 --no-ui --no-voxel-cache --point-splats --capture-sequence captures/motion-point --report captures/motion-point.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --exercise-stability --frames 12 --width 640 --height 480 --no-ui --no-voxel-cache --capture-sequence captures/motion-footprint --report captures/motion-footprint.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --frames 3 --width 320 --height 240 --no-ui --levels 1 --voxel-size .0057 --footprint-radius 2 --footprint-limit 4 --time 1 --report captures/limits.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --point-splats --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/point.ppm --report captures/point-fine.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --verify --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/footprint.ppm --report captures/footprint-fine.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/ci.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --supersampling --frames 3 --width 320 --height 240 --no-ui --report captures/supersampling.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --report captures/controls.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --point-splats --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/point-exercise.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --exercise-stability --frames 12 --width 640 --height 480 --no-ui --no-voxel-cache --point-splats --capture-sequence captures/motion-point --report captures/motion-point.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --exercise-stability --frames 12 --width 640 --height 480 --no-ui --no-voxel-cache --capture-sequence captures/motion-footprint --report captures/motion-footprint.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --frames 3 --width 320 --height 240 --no-ui --levels 1 --voxel-size .0057 --footprint-radius 2 --footprint-limit 4 --time 1 --report captures/limits.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --point-splats --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/point.ppm --report captures/point-fine.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --verify --no-adaptive-lod --frames 3 --width 640 --height 480 --no-ui --voxel-size .0057 --lod-distance 8.6 --time 1 --screenshot captures/footprint.ppm --report captures/footprint-fine.json
           python3 tests/footprint_comparison.py captures/motion-point captures/motion-footprint captures/motion-point.json captures/motion-footprint.json captures/point.ppm captures/footprint.ppm captures/comparison.json
       - name: Garden scene reference, freeze and preview
         env:
           VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
         run: |
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
-          xvfb-run -a ./build/microvoxels --scene garden --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/garden.json
-          xvfb-run -a ./build/microvoxels --scene garden --hidden --validation --verify --time 1 --frames 3 --width 1100 --height 720 --no-ui --screenshot captures/garden.ppm --report captures/garden-preview.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene garden --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/garden.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene garden --hidden --validation --verify --time 1 --frames 3 --width 1100 --height 720 --no-ui --screenshot captures/garden.ppm --report captures/garden-preview.json
       - uses: actions/upload-artifact@v4
         with:
           name: verification-reports
@@ -57,7 +57,7 @@ jobs:
               mesh=${config%-*}
               cull=${config#*-}
               name=captures/render-${scene}-${config}
-              xvfb-run -a ./build/microvoxels --scene "$scene" --cube-mesh "$mesh" --cube-culling "$cull" --hidden --validation --exercise-render --frames 19 --width 320 --height 240 --voxel-size .12 --levels 1 --no-adaptive-lod --no-ui --capture-sequence "$name" --report "$name.json"
+              xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene "$scene" --cube-mesh "$mesh" --cube-culling "$cull" --hidden --validation --exercise-render --frames 19 --width 320 --height 240 --voxel-size .12 --levels 1 --no-adaptive-lod --no-ui --capture-sequence "$name" --report "$name.json"
             done
             for config in indexed-off legacy-back indexed-back; do
               exact=()
@@ -65,8 +65,8 @@ jobs:
               python3 tests/cube_render_comparison.py captures/render-${scene}-legacy-off captures/render-${scene}-${config} captures/render-${scene}-${config}-comparison.json "${exact[@]}"
             done
           done
-          xvfb-run -a ./build/microvoxels --scene test --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --no-vsync --report captures/indexed-controls.json
-          xvfb-run -a ./build/microvoxels --scene garden --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/indexed-exercise.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise-controls --frames 16 --width 480 --height 360 --no-ui --no-vsync --report captures/indexed-controls.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene garden --cube-mesh indexed --cube-culling back --hidden --validation --verify --exercise --frames 8 --width 480 --height 360 --no-ui --report captures/indexed-exercise.json
           python3 - <<'PY'
           import json
           with open('captures/indexed-controls.json') as f:
@@ -88,15 +88,31 @@ jobs:
           VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
         run: |
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
-          xvfb-run -a ./build/microvoxels --scene garden --hidden --validation --no-vsync --exercise-cache --frames 43 --width 480 --height 360 --no-ui --report captures/cache-on.json
-          xvfb-run -a ./build/microvoxels --scene garden --hidden --validation --no-vsync --exercise-cache --frames 43 --width 480 --height 360 --no-ui --no-voxel-cache --report captures/cache-off.json
-          xvfb-run -a ./build/microvoxels --scene test --hidden --validation --no-vsync --exercise-cache --frames 43 --width 320 --height 240 --no-ui --cache-ms 1 --report captures/cache-expiry.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene garden --hidden --validation --no-vsync --exercise-cache --frames 43 --width 480 --height 360 --no-ui --report captures/cache-on.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene garden --hidden --validation --no-vsync --exercise-cache --frames 43 --width 480 --height 360 --no-ui --no-voxel-cache --report captures/cache-off.json
+          xvfb-run -a ./build/microvoxels --source raster --no-taa --cache-ms 100 --scene test --hidden --validation --no-vsync --exercise-cache --frames 43 --width 320 --height 240 --no-ui --cache-ms 1 --report captures/cache-expiry.json
           python3 tests/voxel_cache_comparison.py captures/cache-off.json captures/cache-on.json captures/cache-expiry.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: voxel-cache-verification
           path: captures/cache-*.json
+      - name: Sphere-traced world temporal sampling, RGB, freeze and resets
+        env:
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        run: |
+          export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
+          xvfb-run -a ./build/microvoxels --scene test --source sphere --no-taa --verify --validation --hidden --mode 0 --time 1 --frames 3 --width 160 --height 120 --no-ui --report captures/source-sphere.json
+          xvfb-run -a ./build/microvoxels --scene garden --exercise-temporal --frames 32 --width 160 --height 120 --no-ui --hidden --validation --report captures/temporal-on.json
+          xvfb-run -a ./build/microvoxels --scene garden --exercise-temporal --frames 32 --width 160 --height 120 --no-ui --hidden --validation --no-voxel-cache --report captures/temporal-off.json
+          python3 tests/world_temporal_comparison.py captures/temporal-off.json captures/temporal-on.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: world-temporal-reports
+          path: |
+            captures/temporal-*.json
+            captures/source-sphere.json
   windows-msvc:
     runs-on: windows-2022
     steps:
@@ -121,7 +137,7 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          foreach ($script in @('benchmark_voxel_draw.ps1', 'benchmark_voxel_cache.ps1')) {
+          foreach ($script in @('benchmark_voxel_draw.ps1', 'benchmark_voxel_cache.ps1', 'benchmark_world_temporal.ps1')) {
             $null = [System.Management.Automation.Language.Parser]::ParseFile(
               (Join-Path $PWD "tools/$script"), [ref]$tokens, [ref]$errors)
             if ($errors.Count) { $errors | Format-List; throw 'Benchmark PowerShell syntax failed' }

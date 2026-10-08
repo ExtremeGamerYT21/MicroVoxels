@@ -29,7 +29,7 @@ for ($round = 0; $round -lt $Repeats; ++$round) {
     for ($j = 0; $j -lt $configs.Count; ++$j) {
         $config = $configs[($j + $round) % $configs.Count]
         $reportPath = Join-Path $Output "$($config.Name)-$round.json"
-        $demoArgs = @('--scene', $Scene, '--width', "$Width", '--height', "$Height",
+        $demoArgs = @('--source', 'raster', '--no-taa', '--scene', $Scene, '--width', "$Width", '--height', "$Height",
             '--frames', "$Frames", '--time', '1', '--mode', '1', '--hidden', '--no-ui', '--no-vsync',
             '--voxel-size', $VoxelSize.ToString([Globalization.CultureInfo]::InvariantCulture),
             '--levels', "$Levels", '--cube-mesh', $config.Mesh, '--cube-culling', $config.Cull,

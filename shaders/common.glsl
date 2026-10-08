@@ -12,6 +12,8 @@ layout(push_constant) uniform Parameters {
     ivec4 flags;     // LOD count, average (1) / closest (0), cube-light debug, view mode
     ivec4 footprint; // radius, write limit, renderer-only cull/index switches
     vec4 cache;      // monotonic time, hold seconds (0 disables), previous cell count, hold LOD
+    vec4 temporal;   // current RGB weight (0 disables), trace step budget, source jitter XY
+    vec4 history;    // static camera + source pose, reserved
 }
 params;
 vec3 animatePosition(vec3 p, float weight) {

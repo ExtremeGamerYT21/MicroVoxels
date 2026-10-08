@@ -1,8 +1,8 @@
 # Microvoxels
 
-A C++20/Vulkan experiment that turns **rasterized visible world positions and final source RGB** into a sparse shell of **unlit coloured cubes**. The voxel generator reads source buffers only. It has no source triangle topology, material evaluation, or post-process raycasting.
+A C++20/Vulkan experiment that turns **visible world positions and final source RGB** into a sparse shell of **unlit coloured cubes**. The voxel generator reads source buffers only. It has no source triangle topology, material evaluation, or post-process raycasting.
 
-The default source scene is a 38,425-triangle countryside garden: rolling terrain, grass blades, a tiled-roof cottage, opaque windows, a stone path, trees, a timber fence, a flower bed and a bench. The original 2,860-triangle test scene remains available with `--scene test`. A future SDF, procedural renderer or hardware ray tracer can supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
+The default source scene is a 38,425-triangle countryside garden: rolling terrain, grass blades, a tiled-roof cottage, opaque windows, a stone path, trees, a timber fence, a flower bed and a bench. The original 2,860-triangle test scene remains available with `--scene test`. The primary source now uses GPU sphere tracing of an unsigned surface-distance field over the existing animated scene. `--source raster` keeps triangle rasterization available. Both supply the same visible XYZ + final RGB contract. The normal cube fragment shader is literally `outColor = color;`.
 
 ![Garden source triangles on the left and unlit microvoxels on the right](docs/countryside.png)
 
@@ -53,13 +53,39 @@ Select a source scene; both use the same restored voxel pipeline and settings:
 
 The garden is generated once from a fixed seed. All terrain, roof tiles, grass, flowers and props are ordinary source triangles; no scene mesh data is supplied to the voxel filter. **R** restores the selected scene's starting view. Source grass bending reuses the existing vertex animation and source passes.
 
+## World-grid temporal antialiasing
+
+The default is sphere-traced source visibility plus temporal accumulation **inside
+the fixed world voxel grid**. Eight deterministic subpixel ray offsets collect
+slightly different surface hits. Exact cell + LOD keys combine them; existing
+cells blend 20% current shaded RGB with their previous RGB. Cube transforms remain
+on their original world grid, and the fragment shader still outputs stored RGB.
+
+**M** switches raster/sphere-traced source visibility. **J** toggles world temporal
+AA. **K** toggles history retention/averaging. No screen-space TAA blur or final
+voxel ray traversal is added. Source lighting and the source shadow map stay in
+the source renderer. See [the temporal sampling implementation](docs/WORLD_TEMPORAL_AA.md).
+
+```bat
+.\build-windows\Release\microvoxels.exe --source sphere --taa --no-vsync
+.\build-windows\Release\microvoxels.exe --source raster --taa --no-vsync
+.\build-windows\Release\microvoxels.exe --source raster --no-taa --cache-ms 100 --no-vsync
+```
+
+`--taa-alpha .2` sets the current-frame color weight; `--trace-steps 512` sets the
+sphere-trace iteration budget. Reports expose exhausted source rays and source
+GPU time. Physical GPU performance must be measured; sphere tracing adds distance
+queries and is not assumed to be faster than triangle rasterization.
+
 ## Stabilize intermittent cubes
 
-A bounded voxel cache is enabled by default with a **100 ms** hold time. Press
+A bounded voxel cache is enabled by default with a **200 ms** hold time. Press
 **K** to compare it with rebuilding only from the current source samples. A missing
 cell can persist briefly when a bounded source neighborhood still supports
-its world position and the region keeps the same LOD. Fresh exact-cell samples
-always replace its color; cached samples never change the current RGB reduction.
+its world position and the region keeps the same LOD. With world temporal AA off, fresh exact-cell samples
+replace its color. With it on, fresh RGB is reduced spatially first, then averaged
+with the previous color for that same cell. Temporarily missing jitter phases can
+persist until expiry unless a complete foreground neighborhood occludes them.
 The same short hold also limits rapid changes of each world region's LOD.
 
 ```bat
@@ -99,7 +125,9 @@ Press **T** to compare this with **point mode**, where one valid source sample e
 | G | Separate cube-face-lighting debug pipeline |
 | I | Toggle indexed cube vertices; the frozen cloud is unchanged |
 | B | Toggle safe hardware backface culling |
-| K | Toggle bounded voxel persistence |
+| K | Toggle voxel history |
+| M | Raster / sphere-traced source |
+| J | Toggle source jitter and world-cell RGB accumulation |
 | + / - | Base voxel size |
 | [ / ] | First distance LOD boundary |
 | 1–6 | Number of nested LOD levels |
@@ -121,7 +149,7 @@ Freeze and move around to inspect the sampled shell. Newly exposed surfaces are 
 1. **SourceRenderer** renders opaque visibility, depth, cached world XYZ and final shaded RGB.
 2. **SurfaceSamples** exposes only visible world positions and final RGB, with one previous position image for LOD history.
 3. **VisualVoxelizer** selects world-region LOD, estimates bounded screen-derived footprints, quantizes cells and reduces RGB using exact keys.
-4. An optional GPU cache merge retains briefly missing cells with current source support and compatible region LOD.
+4. The GPU history merge retains eligible cells and averages fresh RGB with old RGB by exact world cell + LOD. History is bounded, expires without renewed source hits, and rejects incompatible LODs/occlusion.
 5. GPU count/prefix/compact passes emit instances in hash-slot order and write the indirect draw count.
 6. **VoxelRenderer** draws centre/size + RGBA instances with stored RGB directly.
 
@@ -132,7 +160,7 @@ faces at the near plane. See [the hardware draw experiments](docs/GPU_RENDERING.
 for a repeatable Windows benchmark and correctness checks. No voxel-generation
 passes, source visibility or RGB semantics change.
 
-The existing XYZ buffer is reused rather than adding depth reconstruction to normal generation. Verification independently reconstructs positions from actual Vulkan depth and inverse VP. All lighting, normals, shadows, materials and tone mapping remain in the source stage. There are no ray–box tests, second source visibility pass, triangle–cell voxelization or persistent voxel volume.
+The existing XYZ buffer is reused rather than adding depth reconstruction to normal generation. Verification independently reconstructs positions from actual Vulkan depth and inverse VP. All lighting, normals, shadows, materials and tone mapping remain in the source stage. The primary sphere tracer uses a source geometry distance-query BVH; generation performs no second visibility pass, voxel ray tests, triangle–cell voxelization or persistent physical-volume simulation.
 
 ## Verification and measurements
 
@@ -140,17 +168,17 @@ The existing XYZ buffer is reused rather than adding depth reconstruction to nor
 ctest --test-dir build --output-on-failure
 ./build/microvoxels --scene garden --validation --verify --exercise --frames 8 --width 480 --height 360
 ./build/microvoxels --scene test --validation --verify --exercise-controls --frames 16 --width 480 --height 360
-./build/microvoxels --scene test --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
+./build/microvoxels --source raster --no-taa --scene test --validation --exercise-stability --frames 12 --width 640 --height 480 --capture-sequence captures/motion
 ./build/microvoxels --frames 120 --time 1 --no-ui --no-vsync --report profile.json
-./build/microvoxels --scene garden --exercise-cache --frames 43 --width 480 --height 360 --no-ui --report cache.json
+./build/microvoxels --source raster --no-taa --scene garden --exercise-cache --frames 43 --width 480 --height 360 --no-ui --report cache.json
 ```
 
-`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. It also checks retained-cell support, unchanged stored RGB, and expiration against a CPU history reference. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.
+`--verify` checks every GPU cell, LOD, RGB reduction, indirect command, footprint limit/counter, and cached XYZ against source depth. It also checks retained-cell support, stored RGB, temporal color averaging, and expiration against a CPU history reference. Footprint occupancy uses independent double-precision polygon clipping on the CPU. Verification and screenshots add readbacks; leave them off for performance measurements.
 
 `--exercise` checks byte-identical frozen buffers across camera motion, then average/closest RGB and cube-light debug. `--exercise-controls` checks camera loss/reset, mouse capture/focus, empty freeze recovery, settings, mode switches and resize. `--exercise-stability` uses three stationary frames followed by nine small camera movements, with fixed source time, albedo lighting and one LOD. It verifies identical stationary cell/RGB sets and records turnover in a static floor patch. `tests/footprint_comparison.py` checks exact stationary RGB screenshots and measures matched motion silhouettes/coverage.
 
 Source sampling is capped at 2048 pixels per dimension. Tables are bounded; the HUD reports drops. Very fine cells, grazing angles, silhouettes, discontinuity fallback and footprint caps can still leave gaps or changing cells. Projected-size LOD is useful when source pixels cover many smaller cells.
 
-Read [the implementation notes](docs/IMPLEMENTATION.md) and [the measured comparison](docs/FOOTPRINTS.md). Opaque geometry only; transparency and temporal occupancy accumulation are not implemented.
+Read [the implementation notes](docs/IMPLEMENTATION.md) and [the measured comparison](docs/FOOTPRINTS.md). Opaque geometry only; transparent source layers are not implemented.
 
 Existing measurement documents refer to the original `--scene test` fixture. Software Vulkan is used for CI correctness and preview rendering; it does not establish performance on a hardware GPU.

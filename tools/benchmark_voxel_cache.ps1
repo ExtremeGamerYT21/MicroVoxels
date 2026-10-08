@@ -20,7 +20,7 @@ for ($round = 0; $round -lt $Repeats; ++$round) {
         $path = Join-Path $Output "$mode-$round.json"
         # Visible window avoids deliberately occluding the hardware workload.
         # Finite runs advance source animation by exactly 1/60 s per frame.
-        $demoArgs = @('--scene', $Scene, '--mode', '1', '--no-ui', '--no-vsync',
+        $demoArgs = @('--source', 'raster', '--no-taa', '--scene', $Scene, '--mode', '1', '--no-ui', '--no-vsync',
             '--width', "$Width", '--height', "$Height", '--frames', "$Frames",
             '--cache-ms', $CacheMs.ToString([Globalization.CultureInfo]::InvariantCulture),
             '--report', $path)

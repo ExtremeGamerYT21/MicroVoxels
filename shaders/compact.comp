@@ -49,7 +49,9 @@ void main() {
         atomicAdd(perLod[lod], 1u);
         return;
     }
-    vec3 rgb = params.flags.y == 1
+    vec3 rgb = (slots[s].nearest & CACHE_OWNER) != 0u
+                   ? uintBitsToFloat(uvec3(slots[s].r, slots[s].g, slots[s].b))
+                   : params.flags.y == 1
                    ? vec3(slots[s].r, slots[s].g, slots[s].b) / (1023.0 * float(slots[s].count))
                    : texelFetch(colors, ownerPixel(slots[s].nearest), 0).rgb;
     voxels[idx].centerSize = vec4((vec3(key.xyz) + .5) * h, h * params.config.w);

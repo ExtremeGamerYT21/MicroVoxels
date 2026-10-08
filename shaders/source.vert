@@ -16,4 +16,5 @@ void main() {
     albedo = v.albedo.xyz;
     gloss = v.normal.w;
     gl_Position = frame.viewProjection * vec4(worldPosition, 1);
+    gl_Position.xy -= 2 * params.temporal.zw / vec2(params.extent.xy) * gl_Position.w;
 }

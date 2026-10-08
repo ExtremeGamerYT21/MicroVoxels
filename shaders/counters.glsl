@@ -5,4 +5,5 @@ layout(set = 0, binding = 9, std430) buffer Counters {
     uint maxFootprintCells, clampedFootprints, rejectedNeighbors, maxFootprintExtent;
     uint cacheRetained, cacheExpired, cacheRejected, cacheDropped;
     uint cacheLodRejected;
+    uint temporalBlends;
 };

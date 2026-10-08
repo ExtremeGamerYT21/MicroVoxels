@@ -10,7 +10,9 @@ struct alignas(16) Parameters {
     glm::vec4 config;
     glm::ivec4 flags;
     glm::ivec4 footprint; // radius, write limit, renderer-only cull/index switches
-    glm::vec4 cache; // monotonic time, hold seconds (0 disables), previous cell count, hold LOD
+    glm::vec4 cache;    // monotonic time, hold seconds (0 disables), previous cell count, hold LOD
+    glm::vec4 temporal; // current RGB weight (0 disables), trace step budget, source jitter XY
+    glm::vec4 history;  // static camera + source pose, reserved
 };
-static_assert(sizeof(Parameters) == 80 && sizeof(Frame) == 176);
+static_assert(sizeof(Parameters) == 112 && sizeof(Frame) == 176);
 } // namespace micro
