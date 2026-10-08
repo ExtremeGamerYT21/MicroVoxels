@@ -72,7 +72,7 @@ the source renderer. See [the temporal sampling implementation](docs/WORLD_TEMPO
 .\build-windows\Release\microvoxels.exe --source raster --no-taa --cache-ms 100 --no-vsync
 ```
 
-`--taa-alpha .2` sets the current-frame color weight; `--trace-steps 512` sets the
+`--taa-alpha .2` sets the current-frame color weight; `--trace-steps 1024` sets the
 sphere-trace iteration budget. Reports expose exhausted source rays and source
 GPU time. Physical GPU performance must be measured; sphere tracing adds distance
 queries and is not assumed to be faster than triangle rasterization.

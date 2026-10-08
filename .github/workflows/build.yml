@@ -103,9 +103,18 @@ jobs:
         run: |
           export VK_ICD_FILENAMES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n1)
           xvfb-run -a ./build/microvoxels --scene test --source sphere --no-taa --verify --validation --hidden --mode 0 --time 1 --frames 3 --width 160 --height 120 --no-ui --report captures/source-sphere.json
+          xvfb-run -a ./build/microvoxels --scene garden --source sphere --taa --closest --verify --validation --hidden --exercise --frames 8 --width 160 --height 120 --no-ui --report captures/temporal-moving.json
           xvfb-run -a ./build/microvoxels --scene garden --exercise-temporal --frames 32 --width 160 --height 120 --no-ui --hidden --validation --report captures/temporal-on.json
           xvfb-run -a ./build/microvoxels --scene garden --exercise-temporal --frames 32 --width 160 --height 120 --no-ui --hidden --validation --no-voxel-cache --report captures/temporal-off.json
           python3 tests/world_temporal_comparison.py captures/temporal-off.json captures/temporal-on.json
+          python3 - <<'PY'
+          import json
+          with open('captures/temporal-moving.json') as f:
+              moving = json.load(f)
+          assert moving['verified_frames'] == 5 and moving['freeze_checks'] == 3
+          assert moving['validation_errors'] == moving['source_raymarch_exhausted_total'] == 0
+          assert moving['temporal_rgb_blends_total'] > 0
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

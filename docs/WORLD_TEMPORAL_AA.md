@@ -9,7 +9,7 @@ needed. Source shading and the rasterized source shadow map remain unchanged.
 
 `--source sphere` and `--source raymarch` select sphere tracing; `--source raster`
 selects the original source pass. M toggles them. The tracer advances by 90% of
-surface distance, with a 0.1 mm contact tolerance and a default 512-step budget.
+surface distance, with a 0.1 mm contact tolerance and a default 1024-step budget.
 `--trace-steps 64..2048` changes the budget. JSON exposes rays, steps, hits and
 exhausted rays; exhausting the budget is a miss, not an invented surface.
 
@@ -61,6 +61,11 @@ shadow/source animation work. These are software measurements, not RX 6700 FPS.
 The no-jitter captures had identical foreground hit counts (10,605), only 41 RGB
 pixels differed, and mean absolute RGB difference was 0.015 on an 8-bit scale.
 M keeps the raster source available; the same world temporal filter works with it.
+
+A moving-camera garden check found one grazing-ray miss at a 512-step budget.
+Raising the limit to 1024 recovered it with 128 additional distance queries across
+3,057,086 original queries (0.0042% more). This motivated the higher default;
+ordinary rays still stop at the same contact or far-plane exit.
 
 History is bounded to 262,144 cells; capacity overflow bypasses history and is
 reported. Low frame rates or short holds may expire a cell before its jitter phase

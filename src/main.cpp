@@ -150,7 +150,7 @@ Options parse(int argc, char **argv) {
                 << "--scene garden|test (default: garden)\n"
                 << "--source raster|raymarch|sphere (default: sphere tracing)\n"
                 << "--taa --no-taa --taa-alpha 0.01..1 (world-cell RGB history, default: .2)\n"
-                << "--trace-steps 64..2048 (default: 512; source sphere-trace budget)\n"
+                << "--trace-steps 64..2048 (default: 1024; source sphere-trace budget)\n"
                 << "--exercise-temporal (32 frames; jitter, RGB history, freeze, source/reset)\n"
                 << "--width N --height N --frames N --hidden --validation --verify --exercise\n"
                 << "--voxel-size METERS --lod-distance METERS --levels 1..6 --mode 0|1|2\n"

@@ -9,7 +9,7 @@ struct Settings {
          visibleHud = true, adaptiveLod = true, footprintSplats = true, indexedCubes = false,
          cullCubes = false, voxelCache = true, raymarch = true, temporalAA = true;
     float temporalWeight = .2f;
-    int traceSteps = 512;
+    int traceSteps = 1024;
 };
 struct HudVertex {
     glm::vec2 position;
